@@ -1,8 +1,11 @@
 (function(){
+  // ====== tiny utils ======
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
   function $(s, r){ return (r||document).querySelector(s); }
   function $all(s, r){ return Array.prototype.slice.call((r||document).querySelectorAll(s)); }
+  function safe(fn){ try{ return fn(); }catch(e){ return undefined; } }
 
+  // ====== panel UI ======
   function ensurePanel(){
     var wrap = $('#gidx-panel'); if (wrap) return wrap;
     wrap = document.createElement('div');
@@ -11,7 +14,7 @@
     wrap.style.right = '16px';
     wrap.style.bottom = '16px';
     wrap.style.zIndex = '2147483647';
-    wrap.style.width = 'min(380px, 92vw)';
+    wrap.style.width = 'min(400px, 92vw)';
     wrap.style.maxHeight = '64vh';
     wrap.style.overflow = 'hidden';
     wrap.style.background = 'rgba(255,255,255,0.98)';
@@ -19,8 +22,7 @@
     wrap.style.borderRadius = '14px';
     wrap.style.boxShadow = '0 6px 28px rgba(0,0,0,0.18)';
     wrap.style.font = '14px system-ui, -apple-system, Segoe UI, Roboto';
-    wrap.style.display = 'flex';
-    wrap.style.flexDirection = 'column';
+    wrap.style.color = '#111';
 
     var bar = document.createElement('div');
     bar.style.display = 'flex';
@@ -39,6 +41,7 @@
       b.style.borderRadius = '10px';
       b.style.border = '1px solid #d1d5db';
       b.style.background = '#fff';
+      b.style.color = '#111';
       b.style.cursor = 'pointer';
       b.style.transition = '.15s';
       b.style.fontWeight = '500';
@@ -56,7 +59,7 @@
     status.style.marginLeft = 'auto';
     status.style.alignSelf = 'center';
     status.style.fontSize = '12px';
-    status.style.opacity = '0.8';
+    status.style.opacity = '0.9';
     status.textContent = '…';
 
     bar.appendChild(btnSelectAll);
@@ -65,6 +68,18 @@
     bar.appendChild(btnExport);
     bar.appendChild(btnReload);
     bar.appendChild(status);
+
+    var opts = document.createElement('div');
+    opts.style.display = 'flex';
+    opts.style.gap = '10px';
+    opts.style.alignItems = 'center';
+    opts.style.padding = '6px 10px';
+    opts.style.borderBottom = '1px solid #eee';
+
+    var encWrap = document.createElement('label');
+    var encCb = document.createElement('input'); encCb.type='checkbox'; encCb.checked=false; encCb.style.marginRight='6px';
+    encWrap.appendChild(encCb); encWrap.appendChild(document.createTextNode('Use encoded URL'));
+    opts.appendChild(encWrap);
 
     var list = document.createElement('div');
     list.id = 'gidx-list';
@@ -81,12 +96,14 @@
     debugBox.style.padding = '8px 10px';
     debugBox.style.borderTop = '1px solid #eee';
     debugBox.style.background = '#fafafa';
-    debugBox.style.maxHeight = '28vh';
+    debugBox.style.color = '#111';
+    debugBox.style.maxHeight = '20vh';
     debugBox.style.overflow = 'auto';
     debugBox.style.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
     debugBox.textContent = 'Debug log will appear here…';
 
     wrap.appendChild(bar);
+    wrap.appendChild(opts);
     wrap.appendChild(list);
     wrap.appendChild(debugBox);
     document.body.appendChild(wrap);
@@ -144,21 +161,27 @@
     };
     btnReload.onclick = function(){ init(true); };
 
+    // expose
     wrap.__setStatus = function(t){ status.textContent = t; };
-    wrap.__setDebug = function(t){ debugBox.textContent = t; };
-    wrap.__appendDebug = function(t){ debugBox.textContent += '\n' + t; };
+    wrap.__setDebug  = function(t){ debugBox.textContent = t; console.log('[gidx]', t); };
+    wrap.__appendDebug = function(t){ debugBox.textContent += '\n' + t; console.log('[gidx]', t); };
     wrap.__clearList = function(){ list.innerHTML = ''; };
     wrap.__addItem = function(name, url){
       var cb = document.createElement('input'); cb.type = 'checkbox'; cb.className = 'gidx-cb'; cb.dataset.url = url; cb.onchange = updateStatus;
-      var label = document.createElement('label'); label.textContent = name; label.style.userSelect = 'none'; label.style.whiteSpace='nowrap'; label.style.overflow='hidden'; label.style.textOverflow='ellipsis'; label.title = name;
+      var label = document.createElement('label'); label.textContent = name; label.style.userSelect='none'; label.style.whiteSpace='nowrap'; label.style.overflow='hidden'; label.style.textOverflow='ellipsis'; label.title = name;
       list.appendChild(cb); list.appendChild(label);
     };
     wrap.__updateStatus = updateStatus;
+    wrap.__useEncoded = function(){ return !!encCb.checked; };
     return wrap;
   }
 
-  function buildURL(base, name){ return base + encodeURIComponent(String(name)); }
+  // ====== URL builder (raw vs encoded) ======
+  function joinUrl(base, name, encoded){
+    return base + (encoded ? encodeURIComponent(String(name)) : String(name));
+  }
 
+  // ====== Source 1: JSON endpoints phổ biến ======
   async function fetchJSONListing(log){
     var base = location.origin + location.pathname.replace(/\/+$/,'') + '/';
     var trials = [
@@ -181,26 +204,17 @@
         var ct = (r.headers.get('content-type')||'').toLowerCase();
         if (ct.indexOf('json') === -1) continue;
         var data = await r.json();
-        var items = [];
-        if (Array.isArray(data)) items = data;
-        else if (Array.isArray(data.files)) items = data.files;
-        else if (Array.isArray(data.data)) items = data.data;
-        else if (data.list && Array.isArray(data.list)) items = data.list;
-        else if (data.children && Array.isArray(data.children)) items = data.children;
-        items = items.map(function(it){
-          var name = it.name || it.filename || it.title || (it.path? String(it.path).split('/').pop(): '');
-          var fold = (it.type===1) || (it.isFolder===true) || (String(it.mime||'').toLowerCase()==='folder');
-          if (typeof it.size === 'undefined' && !/\.[a-z0-9]{1,8}$/i.test(String(name))) fold = true;
-          return { name: String(name||''), isFolder: !!fold };
-        }).filter(function(it){ return it.name; });
+        var items = normalizeItemsFromAnyJSON(data);
         if (items.length) return { base: base, items: items };
       }catch(e){ log('ERR ' + url + ' -> ' + (e && e.message ? e.message : String(e))); }
     }
     return null;
   }
 
+  // ====== Source 2: DOM anchors (khi có <a href>) ======
   function scrapeDOMAnchors(log){
-    var anchors = $all('a[href]'); log('DOM anchors found: ' + anchors.length);
+    var anchors = $all('a[href]');
+    log('DOM anchors count=' + anchors.length);
     var out = [], seen = {};
     for (var i=0;i<anchors.length;i++){
       var a = anchors[i];
@@ -211,10 +225,156 @@
         var isDir = /\/$/.test(u.pathname) || /(\?|&)(id|path|p)=/.test(u.search) || name === '..' || name.toLowerCase()==='parent';
         if (isDir) continue;
         var abs = u.href;
-        if (!seen[abs]){ seen[abs] = 1; out.push({ name: name, url: abs }); }
+        if (!seen[abs]){ seen[abs]=1; out.push({ name:name, url:abs }); }
+      }catch(e){}
+    }
+
+    // Bổ sung: thẻ có data-href/url/download
+    var nodes = $all('[data-href],[data-url],[data-download]');
+    log('DOM data-* candidates=' + nodes.length);
+    for (var j=0;j<nodes.length;j++){
+      var el = nodes[j];
+      var url = el.getAttribute('data-href') || el.getAttribute('data-url') || el.getAttribute('data-download');
+      if (!url) continue;
+      try{
+        var u2 = new URL(url, location.href);
+        var n2 = decodeURIComponent((u2.pathname.split('/').pop()||'').trim());
+        if (!n2) continue;
+        var abs2 = u2.href;
+        if (!seen[abs2]){ seen[abs2]=1; out.push({ name:n2, url:abs2 }); }
       }catch(e){}
     }
     return out;
+  }
+
+  // ====== Source 3: Quét window.MODEL / UI / globals ======
+  function scanWindowForListing(log){
+    var bases = [ safe(function(){return window.MODEL;}), safe(function(){return window.UI;}), window ];
+    var items = [];
+    for (var b=0;b<bases.length;b++){
+      var root = bases[b];
+      try{
+        var found = collectArraysWithFiles(root, 0, 3);
+        if (found.length){
+          log('window-scan found arrays=' + found.length);
+          for (var i=0;i<found.length;i++){
+            var arr = found[i];
+            for (var k=0;k<arr.length;k++){
+              var it = arr[k];
+              var name = it && (it.name || it.filename || it.title || (it.path? String(it.path).split('/').pop(): ''));
+              if (!name) continue;
+              var isFolder = !!(it.type===1 || it.isFolder===true || String(it.mime||'').toLowerCase()==='folder');
+              items.push({ name:String(name), isFolder:isFolder });
+            }
+          }
+        }
+      }catch(e){}
+    }
+    // unique by name
+    var seen = {}, dedup = [];
+    for (var t=0;t<items.length;t++){
+      var key = items[t].name + '|' + (items[t].isFolder?'1':'0');
+      if (!seen[key]){ seen[key]=1; dedup.push(items[t]); }
+    }
+    return dedup;
+  }
+
+  function collectArraysWithFiles(obj, depth, maxDepth){
+    var out = [];
+    if (!obj || depth>maxDepth) return out;
+    if (Array.isArray(obj)){
+      // heuristic: array of objects with "name"/"filename"/"title"
+      var good = obj.filter(function(x){ return x && (x.name || x.filename || x.title || x.path); });
+      if (good.length >= Math.min(2, obj.length)) out.push(obj);
+      return out;
+    }
+    if (typeof obj === 'object'){
+      var keys = Object.keys(obj); if (keys.length>1000) return out; // tránh scan khổng lồ
+      for (var i=0;i<keys.length;i++){
+        var v = obj[keys[i]];
+        try{ out = out.concat(collectArraysWithFiles(v, depth+1, maxDepth)); }catch(e){}
+      }
+    }
+    return out;
+  }
+
+  // ====== Source 4: Bắt fetch/XHR để lấy JSON listing ======
+  (function setupSniffers(){
+    if (window.__gidx_sniffer_installed) return;
+    window.__gidx_sniffer_installed = true;
+
+    var seenJson = [];
+    function pushJson(j){
+      try{
+        var items = normalizeItemsFromAnyJSON(j);
+        if (items.length){
+          window.__GIDX_SEEN_ITEMS__ = items;
+        }
+      }catch(e){}
+    }
+
+    // fetch
+    var ofetch = window.fetch;
+    if (ofetch){
+      window.fetch = function(input, init){
+        return ofetch(input, init).then(function(res){
+          try{
+            var ct = (res.headers && res.headers.get('content-type') || '').toLowerCase();
+            if (ct.indexOf('json') !== -1){
+              res.clone().json().then(pushJson).catch(function(){});
+            }
+          }catch(e){}
+          return res;
+        });
+      };
+    }
+
+    // XHR
+    var OXHR = window.XMLHttpRequest;
+    if (OXHR){
+      function PXHR(){ var x = new OXHR(); return x; }
+      PXHR.prototype = OXHR.prototype;
+      window.XMLHttpRequest = PXHR;
+      var open = OXHR.prototype.open, send = OXHR.prototype.send;
+      PXHR.prototype.open = function(){ this.__gidx_method = arguments[0]; this.__gidx_url = arguments[1]; return open.apply(this, arguments); };
+      PXHR.prototype.send = function(){
+        this.addEventListener('load', function(){
+          try{
+            var ct = (this.getResponseHeader && this.getResponseHeader('content-type') || '').toLowerCase();
+            if (ct.indexOf('json') !== -1){
+              var txt = this.responseText; try{ pushJson(JSON.parse(txt)); }catch(e){}
+            }
+          }catch(e){}
+        });
+        return send.apply(this, arguments);
+      };
+    }
+  })();
+
+  // ====== JSON normalizer ======
+  function normalizeItemsFromAnyJSON(data){
+    var items = [];
+    try{
+      if (Array.isArray(data)) items = data;
+      else if (Array.isArray(data.files)) items = data.files;
+      else if (Array.isArray(data.data)) items = data.data;
+      else if (data.list && Array.isArray(data.list)) items = data.list;
+      else if (data.children && Array.isArray(data.children)) items = data.children;
+      else if (data.items && Array.isArray(data.items)) items = data.items;
+    }catch(e){ items = []; }
+    if (!items || !items.length) return [];
+
+    return items.map(function(it){
+      var name = it && (it.name || it.filename || it.title || (it.path? String(it.path).split('/').pop(): ''));
+      var fold = !!(it && (it.type===1 || it.isFolder===true || String(it.mime||'').toLowerCase()==='folder'));
+      if (typeof (it && it.size) === 'undefined' && name && !/\.[a-z0-9]{1,8}$/i.test(String(name))) fold = fold || false; // không ép thư mục khi không chắc
+      return name ? { name:String(name), isFolder:fold } : null;
+    }).filter(function(x){ return !!x; });
+  }
+
+  // ====== init logic ======
+  function basePath(){
+    return location.origin + location.pathname.replace(/\/+$/,'') + '/';
   }
 
   async function init(force){
@@ -225,36 +385,63 @@
     panel.__setDebug('Starting…');
     panel.__clearList();
 
-    function log(line){ try{ panel.__appendDebug(line); }catch(e){} }
+    function log(line){ panel.__appendDebug(line); }
 
+    var b = basePath();
+
+    // 1) ưu tiên: JSON endpoint
     var listing = await fetchJSONListing(log);
     if (listing && listing.items && listing.items.length){
-      var base = listing.base;
       var files = listing.items.filter(function(it){ return !it.isFolder; });
-      log('JSON ok, items=' + listing.items.length + ', files=' + files.length);
+      log('JSON ok: total=' + listing.items.length + ', files=' + files.length);
       if (files.length){
-        for (var i=0;i<files.length;i++){ var f = files[i]; panel.__addItem(f.name, buildURL(base, f.name)); }
+        var enc = panel.__useEncoded();
+        for (var i=0;i<files.length;i++){ panel.__addItem(files[i].name, joinUrl(b, files[i].name, enc)); }
         panel.__setStatus('Sẵn sàng (JSON)'); panel.__updateStatus(); panel.__initing = false; return;
       }
     }
 
+    // 2) fallback: bắt JSON từ fetch/XHR của app
+    var sniff = window.__GIDX_SEEN_ITEMS__;
+    if (sniff && sniff.length){
+      var files2 = sniff.filter(function(x){ return !x.isFolder; });
+      log('Sniffer ok: files=' + files2.length);
+      if (files2.length){
+        var enc2 = panel.__useEncoded();
+        for (var s=0;s<files2.length;s++){ panel.__addItem(files2[s].name, joinUrl(b, files2[s].name, enc2)); }
+        panel.__setStatus('Sẵn sàng (sniff)'); panel.__updateStatus(); panel.__initing = false; return;
+      }
+    }
+
+    // 3) window.MODEL / UI / globals
+    var winItems = scanWindowForListing(log);
+    if (winItems && winItems.length){
+      var files3 = winItems.filter(function(x){ return !x.isFolder; });
+      log('window-scan: files=' + files3.length + ' (from ' + winItems.length + ' items)');
+      if (files3.length){
+        var enc3 = panel.__useEncoded();
+        for (var w=0; w<files3.length; w++){ panel.__addItem(files3[w].name, joinUrl(b, files3[w].name, enc3)); }
+        panel.__setStatus('Sẵn sàng (window)'); panel.__updateStatus(); panel.__initing = false; return;
+      }
+    }
+
+    // 4) DOM anchors
     var anchors = scrapeDOMAnchors(log);
     if (anchors.length){
-      log('DOM scrape ok, files=' + anchors.length);
+      log('DOM scrape: files=' + anchors.length);
       for (var j=0;j<anchors.length;j++){ panel.__addItem(anchors[j].name, anchors[j].url); }
       panel.__setStatus('Sẵn sàng (DOM)'); panel.__updateStatus(); panel.__initing = false; return;
     }
 
     panel.__setStatus('Không lấy được danh sách');
-    log('No JSON matched and no file-like anchors found.');
+    log('No source produced items.');
     panel.__initing = false;
   }
 
   if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', function(){ init(true); }); }
   else { init(true); }
 
-  setInterval(function(){ if (!document.body.contains($('#gidx-panel'))) { ensurePanel(); } }, 1000);
-
+  // re-init khi SPA đổi URL / DOM
   (function(){
     var oldHref = location.href;
     var obs = new MutationObserver(function(){ if (oldHref !== location.href) { oldHref = location.href; init(true); } });
@@ -264,5 +451,6 @@
       history[m] = function(){ var ret = orig.apply(this, arguments); try { window.dispatchEvent(new Event('locationchange')); } catch(e){} return ret; };
     });
     window.addEventListener('locationchange', function(){ init(true); });
+    setInterval(function(){ if (!document.body.contains($('#gidx-panel'))) { ensurePanel(); } }, 1000);
   })();
 })();
