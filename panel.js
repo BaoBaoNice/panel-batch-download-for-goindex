@@ -1,4 +1,4 @@
-/* panel.js – GoIndex Batch Download (no ZIP) */
+/* panel.js – GoIndex Batch Download (no ZIP) – Dark UI + Minimize */
 (function(){
   /* ========== tiny utils ========== */
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
@@ -7,7 +7,7 @@
   function safe(fn){ try{ return fn(); }catch(e){ return undefined; } }
   function basePath(){ return location.origin + location.pathname.replace(/\/+$/,'') + '/'; }
 
-  /* lọc tên hợp lệ (tránh rác như aswift_0, gB, …) */
+  /* lọc tên hợp lệ */
   function looksLikeFileName(name){
     if (!name || typeof name !== 'string') return false;
     var raw = name.trim();
@@ -15,8 +15,23 @@
     if (raw === '..' || raw.toLowerCase() === 'parent') return false;
     if (raw.length < 4) return false;
     if (/^(aswift|gB|fB|gf|fb|ads?|adserver|_.*)$/i.test(raw)) return false;
-    return /\.[a-z0-9]{2,8}$/i.test(raw); /* có phần mở rộng */
+    return /\.[a-z0-9]{2,8}$/i.test(raw);
   }
+
+  /* ========== THEME (dark) ========== */
+  var C = {
+    bg:        '#2b2f36',
+    bgSoft:    '#323843',
+    border:    '#3a404a',
+    shadow:    '0 6px 28px rgba(0,0,0,0.35)',
+    text:      '#e5e7eb',
+    textDim:   '#cbd5e1',
+    btnBg:     '#3a404a',
+    btnBgHover:'#475066',
+    btnBorder: '#556070',
+    chipBg:    '#1f242d',
+    debugBg:   '#1e232b',
+  };
 
   /* ========== UI panel ========== */
   function ensurePanel(){
@@ -28,75 +43,91 @@
     wrap.style.right = '16px';
     wrap.style.bottom = '16px';
     wrap.style.zIndex = '2147483647';
-    wrap.style.width = 'min(400px, 92vw)';
+    wrap.style.width = 'min(420px, 92vw)';
     wrap.style.maxHeight = '64vh';
     wrap.style.overflow = 'hidden';
-    wrap.style.background = 'rgba(255,255,255,0.98)';
-    wrap.style.border = '1px solid #e5e7eb';
+    wrap.style.background = C.bg;
+    wrap.style.border = '1px solid ' + C.border;
     wrap.style.borderRadius = '14px';
-    wrap.style.boxShadow = '0 6px 28px rgba(0,0,0,0.18)';
+    wrap.style.boxShadow = C.shadow;
     wrap.style.font = '14px system-ui, -apple-system, Segoe UI, Roboto';
-    wrap.style.color = '#111';
+    wrap.style.color = C.text;
     wrap.style.display = 'flex';
     wrap.style.flexDirection = 'column';
 
+    /* header bar */
     var bar = document.createElement('div');
     bar.style.display = 'flex';
     bar.style.gap = '8px';
     bar.style.flexWrap = 'wrap';
     bar.style.padding = '10px';
-    bar.style.borderBottom = '1px solid #eee';
+    bar.style.borderBottom = '1px solid ' + C.border;
     bar.style.position = 'sticky';
     bar.style.top = '0';
-    bar.style.background = 'inherit';
+    bar.style.background = C.bg;
 
     function mkBtn(txt){
       var b = document.createElement('button');
       b.textContent = txt;
       b.style.padding = '6px 10px';
       b.style.borderRadius = '10px';
-      b.style.border = '1px solid #d1d5db';
-      b.style.background = '#fff';
-      b.style.color = '#111';
+      b.style.border = '1px solid ' + C.btnBorder;
+      b.style.background = C.btnBg;
+      b.style.color = C.text;
       b.style.cursor = 'pointer';
       b.style.transition = '.15s';
       b.style.fontWeight = '500';
-      b.addEventListener('mouseenter', function(){ b.style.background = '#f3f4f6'; });
-      b.addEventListener('mouseleave', function(){ b.style.background = '#fff'; });
+      b.addEventListener('mouseenter', function(){ b.style.background = C.btnBgHover; });
+      b.addEventListener('mouseleave', function(){ b.style.background = C.btnBg; });
       return b;
     }
 
     var btnSelectAll = mkBtn('Select all');
-    var btnClear = mkBtn('Clear');
-    var btnDownload = mkBtn('Download selected');
-    var btnExport = mkBtn('Export aria2');
-    var btnReload = mkBtn('Reload');
+    var btnUnselect  = mkBtn('Unselect');      /* đổi nhãn */
+    var btnDownload  = mkBtn('Download selected');
+    var btnExport    = mkBtn('Export list');   /* đổi nhãn */
+    var btnReload    = mkBtn('Reload');
+    var btnToggle    = mkBtn('▾');             /* nút thu nhỏ */
+    btnToggle.title  = 'Collapse / Expand';
+    btnToggle.style.marginLeft = 'auto';
+    btnToggle.style.width = '36px';
+    btnToggle.style.textAlign = 'center';
+    btnToggle.style.padding = '6px 0';
+
     var status = document.createElement('div');
-    status.style.marginLeft = 'auto';
+    status.style.marginLeft = '0';
     status.style.alignSelf = 'center';
     status.style.fontSize = '12px';
-    status.style.opacity = '0.9';
+    status.style.color = C.textDim;
     status.textContent = '…';
 
     bar.appendChild(btnSelectAll);
-    bar.appendChild(btnClear);
+    bar.appendChild(btnUnselect);
     bar.appendChild(btnDownload);
     bar.appendChild(btnExport);
     bar.appendChild(btnReload);
     bar.appendChild(status);
+    bar.appendChild(btnToggle);
 
+    /* options row */
     var opts = document.createElement('div');
     opts.style.display = 'flex';
-    opts.style.gap = '10px';
+    opts.style.gap = '12px';
     opts.style.alignItems = 'center';
-    opts.style.padding = '6px 10px';
-    opts.style.borderBottom = '1px solid #eee';
+    opts.style.padding = '8px 10px';
+    opts.style.borderBottom = '1px solid ' + C.border;
+    opts.style.background = C.bgSoft;
 
     var encWrap = document.createElement('label');
-    var encCb = document.createElement('input'); encCb.type='checkbox'; encCb.checked=false; encCb.style.marginRight='6px';
-    encWrap.appendChild(encCb); encWrap.appendChild(document.createTextNode('Use encoded URL'));
+    encWrap.style.display = 'inline-flex';
+    encWrap.style.alignItems = 'center';
+    encWrap.style.gap = '6px';
+    var encCb = document.createElement('input'); encCb.type='checkbox'; encCb.checked=false;
+    var encTxt = document.createElement('span'); encTxt.textContent = 'Use encoded URL'; encTxt.style.color = C.textDim;
+    encWrap.appendChild(encCb); encWrap.appendChild(encTxt);
     opts.appendChild(encWrap);
 
+    /* list area */
     var list = document.createElement('div');
     list.id = 'gidx-list';
     list.style.overflow = 'auto';
@@ -105,14 +136,16 @@
     list.style.gridTemplateColumns = '24px 1fr';
     list.style.alignItems = 'center';
     list.style.rowGap = '6px';
+    list.style.background = C.bg;
 
+    /* debug */
     var debugBox = document.createElement('pre');
     debugBox.id = 'gidx-debug';
     debugBox.style.margin = '0';
     debugBox.style.padding = '8px 10px';
-    debugBox.style.borderTop = '1px solid #eee';
-    debugBox.style.background = '#fafafa';
-    debugBox.style.color = '#111';
+    debugBox.style.borderTop = '1px solid ' + C.border;
+    debugBox.style.background = C.debugBg;
+    debugBox.style.color = C.textDim;
     debugBox.style.maxHeight = '20vh';
     debugBox.style.overflow = 'auto';
     debugBox.style.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -124,6 +157,7 @@
     wrap.appendChild(debugBox);
     document.body.appendChild(wrap);
 
+    /* helpers */
     function getSelectedLinks(){
       return $all('input.gidx-cb:checked', list).map(function(cb){ return cb.dataset.url; });
     }
@@ -133,11 +167,12 @@
       status.textContent = sel + '/' + total + ' selected';
     }
 
+    /* actions */
     btnSelectAll.onclick = function(){
       $all('input.gidx-cb', list).forEach(function(cb){ cb.checked = true; });
       updateStatus();
     };
-    btnClear.onclick = function(){
+    btnUnselect.onclick = function(){
       $all('input.gidx-cb', list).forEach(function(cb){ cb.checked = false; });
       updateStatus();
     };
@@ -147,7 +182,7 @@
       var blob = new Blob([links.join('\n') + '\n'], {type:'text/plain;charset=utf-8'});
       var a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = 'aria2.txt';
+      a.download = 'list.txt';
       a.click();
       URL.revokeObjectURL(a.href);
     };
@@ -176,6 +211,22 @@
       })();
     };
     btnReload.onclick = function(){ init(true); };
+
+    /* minimize / expand */
+    function applyMinimized(min){
+      var isMin = !!min;
+      list.style.display  = isMin ? 'none' : 'grid';
+      opts.style.display  = isMin ? 'none' : 'flex';
+      debugBox.style.display = isMin ? 'none' : 'block';
+      btnToggle.textContent  = isMin ? '▸' : '▾';
+      localStorage.setItem('gidx_minimized', isMin ? '1' : '0');
+    }
+    btnToggle.onclick = function(){
+      var cur = localStorage.getItem('gidx_minimized') === '1';
+      applyMinimized(!cur);
+    };
+    /* khôi phục trạng thái trước đó */
+    applyMinimized(localStorage.getItem('gidx_minimized') === '1');
 
     /* expose */
     wrap.__setStatus = function(t){ status.textContent = t; };
@@ -284,7 +335,6 @@
         }
       }catch(e){}
     }
-    /* dedup & filter */
     var seen = {}, dedup = [];
     for (var t=0;t<items.length;t++){
       var nm = items[t].name;
@@ -398,7 +448,7 @@
       if (!firstCell) continue;
       var name = (firstCell.textContent || '').replace(/\u00A0/g,' ').trim();
       if (!name) continue;
-      if (/[\/\\]$/.test(name)) continue; /* bỏ thư mục */
+      if (/[\/\\]$/.test(name)) continue;
       if (!looksLikeFileName(name)) continue;
       out.push({ name: name });
     }
@@ -430,7 +480,7 @@
       }
     }
 
-    /* 2) sniff fetch/XHR */
+    /* 2) sniffer */
     var sniff = window.__GIDX_SEEN_ITEMS__;
     if (sniff && sniff.length){
       var files2 = sniff.filter(function(x){ return !x.isFolder && looksLikeFileName(x.name); });
