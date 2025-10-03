@@ -1,13 +1,27 @@
+/* panel.js – GoIndex Batch Download (no ZIP) */
 (function(){
-  // ====== tiny utils ======
+  /* ========== tiny utils ========== */
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
   function $(s, r){ return (r||document).querySelector(s); }
   function $all(s, r){ return Array.prototype.slice.call((r||document).querySelectorAll(s)); }
   function safe(fn){ try{ return fn(); }catch(e){ return undefined; } }
+  function basePath(){ return location.origin + location.pathname.replace(/\/+$/,'') + '/'; }
 
-  // ====== panel UI ======
+  /* lọc tên hợp lệ (tránh rác như aswift_0, gB, …) */
+  function looksLikeFileName(name){
+    if (!name || typeof name !== 'string') return false;
+    var raw = name.trim();
+    if (!raw) return false;
+    if (raw === '..' || raw.toLowerCase() === 'parent') return false;
+    if (raw.length < 4) return false;
+    if (/^(aswift|gB|fB|gf|fb|ads?|adserver|_.*)$/i.test(raw)) return false;
+    return /\.[a-z0-9]{2,8}$/i.test(raw); /* có phần mở rộng */
+  }
+
+  /* ========== UI panel ========== */
   function ensurePanel(){
     var wrap = $('#gidx-panel'); if (wrap) return wrap;
+
     wrap = document.createElement('div');
     wrap.id = 'gidx-panel';
     wrap.style.position = 'fixed';
@@ -23,6 +37,8 @@
     wrap.style.boxShadow = '0 6px 28px rgba(0,0,0,0.18)';
     wrap.style.font = '14px system-ui, -apple-system, Segoe UI, Roboto';
     wrap.style.color = '#111';
+    wrap.style.display = 'flex';
+    wrap.style.flexDirection = 'column';
 
     var bar = document.createElement('div');
     bar.style.display = 'flex';
@@ -161,14 +177,14 @@
     };
     btnReload.onclick = function(){ init(true); };
 
-    // expose
+    /* expose */
     wrap.__setStatus = function(t){ status.textContent = t; };
-    wrap.__setDebug  = function(t){ debugBox.textContent = t; console.log('[gidx]', t); };
-    wrap.__appendDebug = function(t){ debugBox.textContent += '\n' + t; console.log('[gidx]', t); };
+    wrap.__setDebug  = function(t){ debugBox.textContent = t; try{ console.log('[gidx]', t); }catch(e){} };
+    wrap.__appendDebug = function(t){ debugBox.textContent += '\n' + t; try{ console.log('[gidx]', t); }catch(e){} };
     wrap.__clearList = function(){ list.innerHTML = ''; };
     wrap.__addItem = function(name, url){
-      var cb = document.createElement('input'); cb.type = 'checkbox'; cb.className = 'gidx-cb'; cb.dataset.url = url; cb.onchange = updateStatus;
-      var label = document.createElement('label'); label.textContent = name; label.style.userSelect='none'; label.style.whiteSpace='nowrap'; label.style.overflow='hidden'; label.style.textOverflow='ellipsis'; label.title = name;
+      var cb = document.createElement('input'); cb.type='checkbox'; cb.className='gidx-cb'; cb.dataset.url=url; cb.onchange=updateStatus;
+      var label = document.createElement('label'); label.textContent=name; label.style.userSelect='none'; label.style.whiteSpace='nowrap'; label.style.overflow='hidden'; label.style.textOverflow='ellipsis'; label.title=name;
       list.appendChild(cb); list.appendChild(label);
     };
     wrap.__updateStatus = updateStatus;
@@ -176,14 +192,12 @@
     return wrap;
   }
 
-  // ====== URL builder (raw vs encoded) ======
-  function joinUrl(base, name, encoded){
-    return base + (encoded ? encodeURIComponent(String(name)) : String(name));
-  }
+  /* ========== Sources ========== */
+  function joinURL(base, name, encoded){ return base + (encoded ? encodeURIComponent(String(name)) : String(name)); }
 
-  // ====== Source 1: JSON endpoints phổ biến ======
+  /* S1: JSON endpoints phổ biến */
   async function fetchJSONListing(log){
-    var base = location.origin + location.pathname.replace(/\/+$/,'') + '/';
+    var base = basePath();
     var trials = [
       location.href + (location.search ? '&' : '?') + 'json',
       base + '?json',
@@ -204,14 +218,14 @@
         var ct = (r.headers.get('content-type')||'').toLowerCase();
         if (ct.indexOf('json') === -1) continue;
         var data = await r.json();
-        var items = normalizeItemsFromAnyJSON(data);
+        var items = normalizeItemsFromAnyJSON(data).filter(function(it){ return looksLikeFileName(it.name) || it.isFolder; });
         if (items.length) return { base: base, items: items };
       }catch(e){ log('ERR ' + url + ' -> ' + (e && e.message ? e.message : String(e))); }
     }
     return null;
   }
 
-  // ====== Source 2: DOM anchors (khi có <a href>) ======
+  /* S2: DOM anchors */
   function scrapeDOMAnchors(log){
     var anchors = $all('a[href]');
     log('DOM anchors count=' + anchors.length);
@@ -224,12 +238,12 @@
         if (!name) continue;
         var isDir = /\/$/.test(u.pathname) || /(\?|&)(id|path|p)=/.test(u.search) || name === '..' || name.toLowerCase()==='parent';
         if (isDir) continue;
+        if (!looksLikeFileName(name)) continue;
         var abs = u.href;
         if (!seen[abs]){ seen[abs]=1; out.push({ name:name, url:abs }); }
       }catch(e){}
     }
-
-    // Bổ sung: thẻ có data-href/url/download
+    /* data-* fallback */
     var nodes = $all('[data-href],[data-url],[data-download]');
     log('DOM data-* candidates=' + nodes.length);
     for (var j=0;j<nodes.length;j++){
@@ -239,7 +253,7 @@
       try{
         var u2 = new URL(url, location.href);
         var n2 = decodeURIComponent((u2.pathname.split('/').pop()||'').trim());
-        if (!n2) continue;
+        if (!looksLikeFileName(n2)) continue;
         var abs2 = u2.href;
         if (!seen[abs2]){ seen[abs2]=1; out.push({ name:n2, url:abs2 }); }
       }catch(e){}
@@ -247,7 +261,7 @@
     return out;
   }
 
-  // ====== Source 3: Quét window.MODEL / UI / globals ======
+  /* S3: quét window.MODEL / UI / globals */
   function scanWindowForListing(log){
     var bases = [ safe(function(){return window.MODEL;}), safe(function(){return window.UI;}), window ];
     var items = [];
@@ -270,26 +284,26 @@
         }
       }catch(e){}
     }
-    // unique by name
+    /* dedup & filter */
     var seen = {}, dedup = [];
     for (var t=0;t<items.length;t++){
-      var key = items[t].name + '|' + (items[t].isFolder?'1':'0');
+      var nm = items[t].name;
+      if (!looksLikeFileName(nm) && !items[t].isFolder) continue;
+      var key = nm + '|' + (items[t].isFolder?'1':'0');
       if (!seen[key]){ seen[key]=1; dedup.push(items[t]); }
     }
     return dedup;
   }
-
   function collectArraysWithFiles(obj, depth, maxDepth){
     var out = [];
     if (!obj || depth>maxDepth) return out;
     if (Array.isArray(obj)){
-      // heuristic: array of objects with "name"/"filename"/"title"
       var good = obj.filter(function(x){ return x && (x.name || x.filename || x.title || x.path); });
       if (good.length >= Math.min(2, obj.length)) out.push(obj);
       return out;
     }
     if (typeof obj === 'object'){
-      var keys = Object.keys(obj); if (keys.length>1000) return out; // tránh scan khổng lồ
+      var keys = Object.keys(obj); if (keys.length>1000) return out;
       for (var i=0;i<keys.length;i++){
         var v = obj[keys[i]];
         try{ out = out.concat(collectArraysWithFiles(v, depth+1, maxDepth)); }catch(e){}
@@ -298,38 +312,31 @@
     return out;
   }
 
-  // ====== Source 4: Bắt fetch/XHR để lấy JSON listing ======
+  /* S4: sniff fetch/XHR */
   (function setupSniffers(){
     if (window.__gidx_sniffer_installed) return;
     window.__gidx_sniffer_installed = true;
 
-    var seenJson = [];
     function pushJson(j){
       try{
-        var items = normalizeItemsFromAnyJSON(j);
-        if (items.length){
-          window.__GIDX_SEEN_ITEMS__ = items;
-        }
+        var items = normalizeItemsFromAnyJSON(j).filter(function(it){ return looksLikeFileName(it.name) || it.isFolder; });
+        if (items.length){ window.__GIDX_SEEN_ITEMS__ = items; }
       }catch(e){}
     }
 
-    // fetch
     var ofetch = window.fetch;
     if (ofetch){
       window.fetch = function(input, init){
         return ofetch(input, init).then(function(res){
           try{
             var ct = (res.headers && res.headers.get('content-type') || '').toLowerCase();
-            if (ct.indexOf('json') !== -1){
-              res.clone().json().then(pushJson).catch(function(){});
-            }
+            if (ct.indexOf('json') !== -1){ res.clone().json().then(pushJson).catch(function(){}); }
           }catch(e){}
           return res;
         });
       };
     }
 
-    // XHR
     var OXHR = window.XMLHttpRequest;
     if (OXHR){
       function PXHR(){ var x = new OXHR(); return x; }
@@ -351,7 +358,7 @@
     }
   })();
 
-  // ====== JSON normalizer ======
+  /* JSON normalizer */
   function normalizeItemsFromAnyJSON(data){
     var items = [];
     try{
@@ -363,20 +370,42 @@
       else if (data.items && Array.isArray(data.items)) items = data.items;
     }catch(e){ items = []; }
     if (!items || !items.length) return [];
-
     return items.map(function(it){
       var name = it && (it.name || it.filename || it.title || (it.path? String(it.path).split('/').pop(): ''));
       var fold = !!(it && (it.type===1 || it.isFolder===true || String(it.mime||'').toLowerCase()==='folder'));
-      if (typeof (it && it.size) === 'undefined' && name && !/\.[a-z0-9]{1,8}$/i.test(String(name))) fold = fold || false; // không ép thư mục khi không chắc
       return name ? { name:String(name), isFolder:fold } : null;
     }).filter(function(x){ return !!x; });
   }
 
-  // ====== init logic ======
-  function basePath(){
-    return location.origin + location.pathname.replace(/\/+$/,'') + '/';
+  /* S5: scraper dành riêng cho alx-xlx: đọc cột "File" trong bảng */
+  function scrapeAlxTable(log){
+    var tables = document.querySelectorAll('table');
+    if (!tables || !tables.length) { log('alx-table: no <table>'); return []; }
+    var target = null;
+    for (var i=0;i<tables.length;i++){
+      var t = tables[i];
+      var head = t.querySelector('thead') || t;
+      var txt = (head.textContent || '').toLowerCase();
+      if (txt.indexOf('file') !== -1 && (txt.indexOf('modified') !== -1 || txt.indexOf('size') !== -1)) { target = t; break; }
+    }
+    if (!target) { log('alx-table: no header match'); return []; }
+
+    var rows = target.querySelectorAll('tbody tr, tr');
+    var out = [];
+    for (var r=0;r<rows.length;r++){
+      var tr = rows[r];
+      var firstCell = tr.querySelector('td') || tr.children[0];
+      if (!firstCell) continue;
+      var name = (firstCell.textContent || '').replace(/\u00A0/g,' ').trim();
+      if (!name) continue;
+      if (/[\/\\]$/.test(name)) continue; /* bỏ thư mục */
+      if (!looksLikeFileName(name)) continue;
+      out.push({ name: name });
+    }
+    return out;
   }
 
+  /* ========== init flow ========== */
   async function init(force){
     var panel = ensurePanel();
     if (!force && panel.__initing) return;
@@ -387,45 +416,57 @@
 
     function log(line){ panel.__appendDebug(line); }
 
-    var b = basePath();
+    var base = basePath();
 
-    // 1) ưu tiên: JSON endpoint
+    /* 1) JSON endpoints */
     var listing = await fetchJSONListing(log);
     if (listing && listing.items && listing.items.length){
-      var files = listing.items.filter(function(it){ return !it.isFolder; });
+      var files = listing.items.filter(function(it){ return !it.isFolder && looksLikeFileName(it.name); });
       log('JSON ok: total=' + listing.items.length + ', files=' + files.length);
       if (files.length){
         var enc = panel.__useEncoded();
-        for (var i=0;i<files.length;i++){ panel.__addItem(files[i].name, joinUrl(b, files[i].name, enc)); }
+        for (var i=0;i<files.length;i++){ panel.__addItem(files[i].name, joinURL(base, files[i].name, enc)); }
         panel.__setStatus('Sẵn sàng (JSON)'); panel.__updateStatus(); panel.__initing = false; return;
       }
     }
 
-    // 2) fallback: bắt JSON từ fetch/XHR của app
+    /* 2) sniff fetch/XHR */
     var sniff = window.__GIDX_SEEN_ITEMS__;
     if (sniff && sniff.length){
-      var files2 = sniff.filter(function(x){ return !x.isFolder; });
+      var files2 = sniff.filter(function(x){ return !x.isFolder && looksLikeFileName(x.name); });
       log('Sniffer ok: files=' + files2.length);
       if (files2.length){
         var enc2 = panel.__useEncoded();
-        for (var s=0;s<files2.length;s++){ panel.__addItem(files2[s].name, joinUrl(b, files2[s].name, enc2)); }
+        for (var s=0;s<files2.length;s++){ panel.__addItem(files2[s].name, joinURL(base, files2[s].name, enc2)); }
         panel.__setStatus('Sẵn sàng (sniff)'); panel.__updateStatus(); panel.__initing = false; return;
       }
     }
 
-    // 3) window.MODEL / UI / globals
+    /* 3) window scan */
     var winItems = scanWindowForListing(log);
     if (winItems && winItems.length){
-      var files3 = winItems.filter(function(x){ return !x.isFolder; });
+      var files3 = winItems.filter(function(x){ return !x.isFolder && looksLikeFileName(x.name); });
       log('window-scan: files=' + files3.length + ' (from ' + winItems.length + ' items)');
       if (files3.length){
         var enc3 = panel.__useEncoded();
-        for (var w=0; w<files3.length; w++){ panel.__addItem(files3[w].name, joinUrl(b, files3[w].name, enc3)); }
+        for (var w=0; w<files3.length; w++){ panel.__addItem(files3[w].name, joinURL(base, files3[w].name, enc3)); }
         panel.__setStatus('Sẵn sàng (window)'); panel.__updateStatus(); panel.__initing = false; return;
       }
     }
 
-    // 4) DOM anchors
+    /* 4) alx-xlx table scraper */
+    var alx = scrapeAlxTable(log);
+    if (alx && alx.length){
+      var filesA = alx.filter(function(x){ return looksLikeFileName(x.name); });
+      log('alx-table: files=' + filesA.length);
+      if (filesA.length){
+        var encA = panel.__useEncoded();
+        for (var a=0;a<filesA.length;a++){ panel.__addItem(filesA[a].name, joinURL(base, filesA[a].name, encA)); }
+        panel.__setStatus('Sẵn sàng (alx-table)'); panel.__updateStatus(); panel.__initing = false; return;
+      }
+    }
+
+    /* 5) DOM anchors */
     var anchors = scrapeDOMAnchors(log);
     if (anchors.length){
       log('DOM scrape: files=' + anchors.length);
@@ -441,7 +482,7 @@
   if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', function(){ init(true); }); }
   else { init(true); }
 
-  // re-init khi SPA đổi URL / DOM
+  /* re-init khi SPA đổi URL / DOM */
   (function(){
     var oldHref = location.href;
     var obs = new MutationObserver(function(){ if (oldHref !== location.href) { oldHref = location.href; init(true); } });
