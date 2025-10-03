@@ -2,9 +2,9 @@
 
 A lightweight batch download panel for GoIndex frontends.
 It adds checkboxes, bulk actions, and a small floating panel to your GoIndex pages — without requiring ZIP packing.
-## Works with ONLY "**alx-xlx/goindex**".##
+## Works with ONLY "**alx-xlx/goindex**".
 
-## DEMO: https://gd-index.minicute.workers.dev/ ##
+## DEMO: https://gd-index.minicute.workers.dev/
 
 <img width="840" height="772" alt="image" src="https://github.com/user-attachments/assets/5747367f-f143-45bd-bbb5-d63d6d73e350" />
 
