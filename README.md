@@ -10,8 +10,14 @@ It adds checkboxes, bulk actions, and a small floating panel to your GoIndex pag
 
 ## 🚀 Installation ##
 
-Open your "Worker.js". Add "```<script src="https://cdn.jsdelivr.net/gh/BaoBaoNice/panel-batch-download-for-goindex@v4/panel.js" defer></script>```" to ```"<html>", before "</body>"```
-Example:
+Open your "Worker.js". Add<br>
+```
+<script src="https://cdn.jsdelivr.net/gh/BaoBaoNice/panel-batch-download-for-goindex@v4/panel.js" defer></script>
+```
+
+to ```"<html>"```, before ```"</body>"``` <br>
+
+Example:<br>
 ```
 </head>
 <body>
