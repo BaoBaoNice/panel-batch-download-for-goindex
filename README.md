@@ -26,8 +26,6 @@ Example:<br>
 </html>
 ```
 
-<img width="902" height="56" alt="image" src="https://github.com/user-attachments/assets/7fc11911-05ca-4482-ad89-4494f9a79f52" />
-
 ## 🧾 License ##
 
 MIT License. Free to use and modify.
