@@ -1,41 +1,224 @@
-/* panel.js – GoIndex Batch Download (no ZIP) – Dark UI + Minimize */
-(function(){
-  /* ========== tiny utils ========== */
-  function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
-  function $(s, r){ return (r||document).querySelector(s); }
-  function $all(s, r){ return Array.prototype.slice.call((r||document).querySelectorAll(s)); }
-  function safe(fn){ try{ return fn(); }catch(e){ return undefined; } }
-  function basePath(){ return location.origin + location.pathname.replace(/\/+$/,'') + '/'; }
+/* panel.js - GoIndex Batch Download Panel with Queue (2 concurrent by default)
+ * Works with alx-xlx/goindex frontend.
+ * Features:
+ * - Batch select/download
+ * - Real queue with configurable concurrency
+ * - Per-file states: waiting / downloading / done / error / canceled
+ * - Progress display
+ * - Retry failed
+ * - Clear done
+ * - Encoded URL option
+ *
+ * Note:
+ * - Uses fetch + blob so the queue knows exactly when a download finishes.
+ * - Large files can consume browser memory. For very large files, a StreamSaver.js variant is better.
+ */
+(function () {
+  'use strict';
 
-  /* lọc tên hợp lệ */
-  function looksLikeFileName(name){
+  /* =========================
+   * tiny utils
+   * ========================= */
+  function $(s, r) { return (r || document).querySelector(s); }
+  function $all(s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); }
+  function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  function safe(fn, fallback) {
+    try { return fn(); } catch (e) { return fallback; }
+  }
+  function fmtBytes(n) {
+    if (!isFinite(n) || n <= 0) return '0 B';
+    var u = ['B', 'KB', 'MB', 'GB', 'TB'];
+    var i = Math.floor(Math.log(n) / Math.log(1024));
+    i = Math.max(0, Math.min(i, u.length - 1));
+    var v = n / Math.pow(1024, i);
+    return (v >= 100 || i === 0 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + ' ' + u[i];
+  }
+  function fmtPct(done, total) {
+    if (!total || total <= 0) return '...';
+    var pct = Math.floor((done / total) * 100);
+    pct = Math.max(0, Math.min(100, pct));
+    return pct + '%';
+  }
+  function truncate(s, n) {
+    s = String(s || '');
+    return s.length > n ? s.slice(0, n - 1) + '…' : s;
+  }
+  function sanitizeFileName(name) {
+    name = String(name || 'download');
+    return name.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim() || 'download';
+  }
+  function logLine(msg) {
+    var box = $('#gidx-debug');
+    if (!box) return;
+    var now = new Date();
+    var hh = String(now.getHours()).padStart(2, '0');
+    var mm = String(now.getMinutes()).padStart(2, '0');
+    var ss = String(now.getSeconds()).padStart(2, '0');
+    box.textContent += '\n[' + hh + ':' + mm + ':' + ss + '] ' + msg;
+    box.scrollTop = box.scrollHeight;
+    try { console.log('[gidx]', msg); } catch (e) {}
+  }
+
+  function basePath() {
+    return location.origin + location.pathname.replace(/\/+$/, '') + '/';
+  }
+
+  function looksLikeFileName(name) {
     if (!name || typeof name !== 'string') return false;
     var raw = name.trim();
     if (!raw) return false;
     if (raw === '..' || raw.toLowerCase() === 'parent') return false;
-    if (raw.length < 4) return false;
     if (/^(aswift|gB|fB|gf|fb|ads?|adserver|_.*)$/i.test(raw)) return false;
-    return /\.[a-z0-9]{2,8}$/i.test(raw);
+    return /\.[a-z0-9]{1,12}$/i.test(raw);
   }
 
-  /* ========== THEME (dark) ========== */
+  function joinURL(base, name, encoded) {
+    return base + (encoded ? encodeURIComponent(String(name)) : String(name));
+  }
+
+  function guessNameFromUrl(url) {
+    return safe(function () {
+      var u = new URL(url, location.href);
+      var raw = u.pathname.split('/').pop() || 'download';
+      return sanitizeFileName(decodeURIComponent(raw));
+    }, 'download');
+  }
+
+  function downloadBlob(blob, name) {
+    var a = document.createElement('a');
+    var href = URL.createObjectURL(blob);
+    a.href = href;
+    a.download = sanitizeFileName(name);
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () {
+      URL.revokeObjectURL(href);
+    }, 30000);
+  }
+
+  /* =========================
+   * theme
+   * ========================= */
   var C = {
-    bg:        '#2b2f36',
-    bgSoft:    '#323843',
-    border:    '#3a404a',
-    shadow:    '0 6px 28px rgba(0,0,0,0.35)',
-    text:      '#e5e7eb',
-    textDim:   '#cbd5e1',
-    btnBg:     '#3a404a',
-    btnBgHover:'#475066',
+    bg: '#2b2f36',
+    bgSoft: '#323843',
+    bgSoft2: '#262b33',
+    border: '#3a404a',
+    shadow: '0 6px 28px rgba(0,0,0,0.35)',
+    text: '#e5e7eb',
+    textDim: '#cbd5e1',
+    muted: '#94a3b8',
+    btnBg: '#3a404a',
+    btnBgHover: '#475066',
     btnBorder: '#556070',
-    chipBg:    '#1f242d',
-    debugBg:   '#1e232b',
+    chipBg: '#1f242d',
+    debugBg: '#1e232b',
+    green: '#22c55e',
+    yellow: '#f59e0b',
+    red: '#ef4444',
+    blue: '#38bdf8',
+    gray: '#64748b'
   };
 
-  /* ========== UI panel ========== */
-  function ensurePanel(){
-    var wrap = $('#gidx-panel'); if (wrap) return wrap;
+  /* =========================
+   * store / settings
+   * ========================= */
+  var STORE = {
+    minKey: 'gidx_minimized',
+    encodedKey: 'gidx_use_encoded',
+    concKey: 'gidx_concurrency'
+  };
+
+  function getConcurrency() {
+    var v = parseInt(localStorage.getItem(STORE.concKey) || '2', 10);
+    if (!isFinite(v) || v < 1) v = 2;
+    if (v > 8) v = 8;
+    return v;
+  }
+
+  /* =========================
+   * queue state
+   * ========================= */
+  var queue = [];
+  var jobsById = Object.create(null);
+  var activeCount = 0;
+  var isPumpRunning = false;
+  var nextJobId = 1;
+
+  function makeJob(name, url) {
+    return {
+      id: String(nextJobId++),
+      name: name,
+      url: url,
+      state: 'waiting', // waiting/downloading/done/error/canceled
+      loaded: 0,
+      total: 0,
+      error: '',
+      controller: null,
+      addedAt: Date.now(),
+      startedAt: 0,
+      finishedAt: 0
+    };
+  }
+
+  function stateColor(state) {
+    if (state === 'done') return C.green;
+    if (state === 'downloading') return C.blue;
+    if (state === 'waiting') return C.yellow;
+    if (state === 'error') return C.red;
+    if (state === 'canceled') return C.gray;
+    return C.muted;
+  }
+
+  function stateText(job) {
+    switch (job.state) {
+      case 'waiting': return 'Waiting';
+      case 'downloading':
+        if (job.total > 0) return 'Downloading ' + fmtPct(job.loaded, job.total);
+        if (job.loaded > 0) return 'Downloading ' + fmtBytes(job.loaded);
+        return 'Downloading';
+      case 'done': return 'Done';
+      case 'error': return 'Error';
+      case 'canceled': return 'Canceled';
+      default: return job.state || 'Unknown';
+    }
+  }
+
+  /* =========================
+   * UI
+   * ========================= */
+  function mkBtn(text) {
+    var b = document.createElement('button');
+    b.textContent = text;
+    b.style.padding = '6px 10px';
+    b.style.borderRadius = '10px';
+    b.style.border = '1px solid ' + C.btnBorder;
+    b.style.background = C.btnBg;
+    b.style.color = C.text;
+    b.style.cursor = 'pointer';
+    b.style.transition = '.15s';
+    b.style.fontWeight = '500';
+    b.onmouseenter = function () { b.style.background = C.btnBgHover; };
+    b.onmouseleave = function () { b.style.background = C.btnBg; };
+    return b;
+  }
+
+  function mkChip(text) {
+    var el = document.createElement('span');
+    el.textContent = text;
+    el.style.display = 'inline-block';
+    el.style.padding = '2px 8px';
+    el.style.borderRadius = '999px';
+    el.style.background = C.chipBg;
+    el.style.color = C.textDim;
+    el.style.fontSize = '12px';
+    return el;
+  }
+
+  function ensurePanel() {
+    var wrap = $('#gidx-panel');
+    if (wrap) return wrap;
 
     wrap = document.createElement('div');
     wrap.id = 'gidx-panel';
@@ -43,76 +226,62 @@
     wrap.style.right = '16px';
     wrap.style.bottom = '16px';
     wrap.style.zIndex = '2147483647';
-    wrap.style.width = 'min(420px, 92vw)';
-    wrap.style.maxHeight = '64vh';
+    wrap.style.width = 'min(560px, 95vw)';
+    wrap.style.maxHeight = '80vh';
     wrap.style.overflow = 'hidden';
     wrap.style.background = C.bg;
     wrap.style.border = '1px solid ' + C.border;
     wrap.style.borderRadius = '14px';
     wrap.style.boxShadow = C.shadow;
-    wrap.style.font = '14px system-ui, -apple-system, Segoe UI, Roboto';
+    wrap.style.font = '14px system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif';
     wrap.style.color = C.text;
     wrap.style.display = 'flex';
     wrap.style.flexDirection = 'column';
 
-    /* header bar */
-    var bar = document.createElement('div');
-    bar.style.display = 'flex';
-    bar.style.gap = '8px';
-    bar.style.flexWrap = 'wrap';
-    bar.style.padding = '10px';
-    bar.style.borderBottom = '1px solid ' + C.border;
-    bar.style.position = 'sticky';
-    bar.style.top = '0';
-    bar.style.background = C.bg;
-
-    function mkBtn(txt){
-      var b = document.createElement('button');
-      b.textContent = txt;
-      b.style.padding = '6px 10px';
-      b.style.borderRadius = '10px';
-      b.style.border = '1px solid ' + C.btnBorder;
-      b.style.background = C.btnBg;
-      b.style.color = C.text;
-      b.style.cursor = 'pointer';
-      b.style.transition = '.15s';
-      b.style.fontWeight = '500';
-      b.addEventListener('mouseenter', function(){ b.style.background = C.btnBgHover; });
-      b.addEventListener('mouseleave', function(){ b.style.background = C.btnBg; });
-      return b;
-    }
+    var header = document.createElement('div');
+    header.style.display = 'flex';
+    header.style.flexWrap = 'wrap';
+    header.style.gap = '8px';
+    header.style.padding = '10px';
+    header.style.borderBottom = '1px solid ' + C.border;
+    header.style.background = C.bg;
 
     var btnSelectAll = mkBtn('Select all');
-    var btnUnselect  = mkBtn('Unselect');      /* đổi nhãn */
-    var btnDownload  = mkBtn('Download selected');
-    var btnExport    = mkBtn('Export list');   /* đổi nhãn */
-    var btnReload    = mkBtn('Reload');
-    var btnToggle    = mkBtn('▾');             /* nút thu nhỏ */
-    btnToggle.title  = 'Collapse / Expand';
+    var btnUnselect = mkBtn('Unselect');
+    var btnDownload = mkBtn('Queue selected');
+    var btnExport = mkBtn('Export list');
+    var btnReload = mkBtn('Reload');
+    var btnRetryFailed = mkBtn('Retry failed');
+    var btnClearDone = mkBtn('Clear done');
+    var btnToggle = mkBtn('▾');
+
+    btnToggle.title = 'Collapse / Expand';
     btnToggle.style.marginLeft = 'auto';
     btnToggle.style.width = '36px';
     btnToggle.style.textAlign = 'center';
     btnToggle.style.padding = '6px 0';
 
     var status = document.createElement('div');
-    status.style.marginLeft = '0';
-    status.style.alignSelf = 'center';
+    status.id = 'gidx-status';
+    status.style.width = '100%';
     status.style.fontSize = '12px';
     status.style.color = C.textDim;
-    status.textContent = '…';
+    status.textContent = 'Loading…';
 
-    bar.appendChild(btnSelectAll);
-    bar.appendChild(btnUnselect);
-    bar.appendChild(btnDownload);
-    bar.appendChild(btnExport);
-    bar.appendChild(btnReload);
-    bar.appendChild(status);
-    bar.appendChild(btnToggle);
+    header.appendChild(btnSelectAll);
+    header.appendChild(btnUnselect);
+    header.appendChild(btnDownload);
+    header.appendChild(btnExport);
+    header.appendChild(btnReload);
+    header.appendChild(btnRetryFailed);
+    header.appendChild(btnClearDone);
+    header.appendChild(btnToggle);
+    header.appendChild(status);
 
-    /* options row */
     var opts = document.createElement('div');
     opts.style.display = 'flex';
-    opts.style.gap = '12px';
+    opts.style.flexWrap = 'wrap';
+    opts.style.gap = '16px';
     opts.style.alignItems = 'center';
     opts.style.padding = '8px 10px';
     opts.style.borderBottom = '1px solid ' + C.border;
@@ -122,23 +291,113 @@
     encWrap.style.display = 'inline-flex';
     encWrap.style.alignItems = 'center';
     encWrap.style.gap = '6px';
-    var encCb = document.createElement('input'); encCb.type='checkbox'; encCb.checked=false;
-    var encTxt = document.createElement('span'); encTxt.textContent = 'Use encoded URL'; encTxt.style.color = C.textDim;
-    encWrap.appendChild(encCb); encWrap.appendChild(encTxt);
+    var encCb = document.createElement('input');
+    encCb.type = 'checkbox';
+    encCb.checked = localStorage.getItem(STORE.encodedKey) === '1';
+    var encTxt = document.createElement('span');
+    encTxt.textContent = 'Use encoded URL';
+    encTxt.style.color = C.textDim;
+    encWrap.appendChild(encCb);
+    encWrap.appendChild(encTxt);
+
+    var concWrap = document.createElement('label');
+    concWrap.style.display = 'inline-flex';
+    concWrap.style.alignItems = 'center';
+    concWrap.style.gap = '6px';
+    var concTxt = document.createElement('span');
+    concTxt.textContent = 'Concurrent';
+    concTxt.style.color = C.textDim;
+    var concInput = document.createElement('input');
+    concInput.type = 'number';
+    concInput.min = '1';
+    concInput.max = '8';
+    concInput.step = '1';
+    concInput.value = String(getConcurrency());
+    concInput.style.width = '56px';
+    concInput.style.padding = '4px 6px';
+    concInput.style.borderRadius = '8px';
+    concInput.style.border = '1px solid ' + C.btnBorder;
+    concInput.style.background = C.bgSoft2;
+    concInput.style.color = C.text;
+    concWrap.appendChild(concTxt);
+    concWrap.appendChild(concInput);
+
+    var stats = document.createElement('div');
+    stats.style.display = 'inline-flex';
+    stats.style.alignItems = 'center';
+    stats.style.gap = '8px';
+    stats.appendChild(mkChip('Queue'));
+    var queueSummary = document.createElement('span');
+    queueSummary.id = 'gidx-queue-summary';
+    queueSummary.style.fontSize = '12px';
+    queueSummary.style.color = C.textDim;
+    queueSummary.textContent = '0 waiting | 0 active | 0 done';
+    stats.appendChild(queueSummary);
+
     opts.appendChild(encWrap);
+    opts.appendChild(concWrap);
+    opts.appendChild(stats);
 
-    /* list area */
-    var list = document.createElement('div');
-    list.id = 'gidx-list';
-    list.style.overflow = 'auto';
-    list.style.padding = '8px 10px';
-    list.style.display = 'grid';
-    list.style.gridTemplateColumns = '24px 1fr';
-    list.style.alignItems = 'center';
-    list.style.rowGap = '6px';
-    list.style.background = C.bg;
+    var body = document.createElement('div');
+    body.id = 'gidx-body';
+    body.style.display = 'grid';
+    body.style.gridTemplateColumns = 'minmax(220px, 1fr) minmax(260px, 1fr)';
+    body.style.minHeight = '260px';
+    body.style.maxHeight = '42vh';
 
-    /* debug */
+    var filePane = document.createElement('div');
+    filePane.style.borderRight = '1px solid ' + C.border;
+    filePane.style.display = 'flex';
+    filePane.style.flexDirection = 'column';
+    filePane.style.minWidth = '0';
+
+    var fileHead = document.createElement('div');
+    fileHead.textContent = 'Files';
+    fileHead.style.padding = '8px 10px';
+    fileHead.style.borderBottom = '1px solid ' + C.border;
+    fileHead.style.background = C.bgSoft2;
+    fileHead.style.fontWeight = '600';
+
+    var fileList = document.createElement('div');
+    fileList.id = 'gidx-list';
+    fileList.style.overflow = 'auto';
+    fileList.style.padding = '8px 10px';
+    fileList.style.display = 'grid';
+    fileList.style.gridTemplateColumns = '24px 1fr';
+    fileList.style.alignItems = 'center';
+    fileList.style.rowGap = '6px';
+    fileList.style.minWidth = '0';
+
+    filePane.appendChild(fileHead);
+    filePane.appendChild(fileList);
+
+    var queuePane = document.createElement('div');
+    queuePane.style.display = 'flex';
+    queuePane.style.flexDirection = 'column';
+    queuePane.style.minWidth = '0';
+
+    var queueHead = document.createElement('div');
+    queueHead.textContent = 'Queue';
+    queueHead.style.padding = '8px 10px';
+    queueHead.style.borderBottom = '1px solid ' + C.border;
+    queueHead.style.background = C.bgSoft2;
+    queueHead.style.fontWeight = '600';
+
+    var queueList = document.createElement('div');
+    queueList.id = 'gidx-queue';
+    queueList.style.overflow = 'auto';
+    queueList.style.padding = '8px 10px';
+    queueList.style.display = 'flex';
+    queueList.style.flexDirection = 'column';
+    queueList.style.gap = '8px';
+    queueList.style.minWidth = '0';
+
+    queuePane.appendChild(queueHead);
+    queuePane.appendChild(queueList);
+
+    body.appendChild(filePane);
+    body.appendChild(queuePane);
+
     var debugBox = document.createElement('pre');
     debugBox.id = 'gidx-debug';
     debugBox.style.margin = '0';
@@ -146,108 +405,534 @@
     debugBox.style.borderTop = '1px solid ' + C.border;
     debugBox.style.background = C.debugBg;
     debugBox.style.color = C.textDim;
-    debugBox.style.maxHeight = '20vh';
+    debugBox.style.maxHeight = '18vh';
     debugBox.style.overflow = 'auto';
     debugBox.style.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
-    debugBox.textContent = 'Debug log will appear here…';
+    debugBox.textContent = 'Debug log ready.';
 
-    wrap.appendChild(bar);
+    wrap.appendChild(header);
     wrap.appendChild(opts);
-    wrap.appendChild(list);
+    wrap.appendChild(body);
     wrap.appendChild(debugBox);
     document.body.appendChild(wrap);
 
-    /* helpers */
-    function getSelectedLinks(){
-      return $all('input.gidx-cb:checked', list).map(function(cb){ return cb.dataset.url; });
-    }
-    function updateStatus(){
-      var total = $all('input.gidx-cb', list).length;
-      var sel = $all('input.gidx-cb:checked', list).length;
-      status.textContent = sel + '/' + total + ' selected';
+    function getSelectedItems() {
+      return $all('input.gidx-cb:checked', fileList).map(function (cb) {
+        return {
+          name: cb.dataset.name,
+          url: cb.dataset.url
+        };
+      });
     }
 
-    /* actions */
-    btnSelectAll.onclick = function(){
-      $all('input.gidx-cb', list).forEach(function(cb){ cb.checked = true; });
-      updateStatus();
-    };
-    btnUnselect.onclick = function(){
-      $all('input.gidx-cb', list).forEach(function(cb){ cb.checked = false; });
-      updateStatus();
-    };
-    btnExport.onclick = function(){
-      var links = getSelectedLinks();
-      if (!links.length) return alert('Chưa chọn file nào.');
-      var blob = new Blob([links.join('\n') + '\n'], {type:'text/plain;charset=utf-8'});
-      var a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = 'list.txt';
-      a.click();
-      URL.revokeObjectURL(a.href);
-    };
-    btnDownload.onclick = function(){
-      (async function(){
-        var links = getSelectedLinks();
-        if (!links.length) return alert('Chưa chọn file nào.');
-        var concurrency = 3, q = links.slice();
-        async function worker(){
-          while(q.length){
-            var url = q.shift();
-            try{
-              var a = document.createElement('a');
-              a.href = url;
-              a.rel = 'noreferrer';
-              a.target = '_blank';
-              try{ a.download = decodeURIComponent((new URL(url)).pathname.split('/').pop() || ''); }catch(e){}
-              document.body.appendChild(a);
-              a.click();
-              a.remove();
-            }catch(e){}
-            await sleep(60);
-          }
-        }
-        await Promise.all([worker(),worker(),worker()].slice(0,concurrency));
-      })();
-    };
-    btnReload.onclick = function(){ init(true); };
+    function updateFileStatus() {
+      var total = $all('input.gidx-cb', fileList).length;
+      var sel = $all('input.gidx-cb:checked', fileList).length;
+      var waiting = queue.filter(function (j) { return j.state === 'waiting'; }).length;
+      var downloading = queue.filter(function (j) { return j.state === 'downloading'; }).length;
+      var done = queue.filter(function (j) { return j.state === 'done'; }).length;
+      var failed = queue.filter(function (j) { return j.state === 'error'; }).length;
+      var canceled = queue.filter(function (j) { return j.state === 'canceled'; }).length;
 
-    /* minimize / expand */
-    function applyMinimized(min){
+      status.textContent =
+        sel + '/' + total + ' selected | ' +
+        waiting + ' waiting | ' +
+        downloading + ' downloading | ' +
+        done + ' done | ' +
+        failed + ' failed | ' +
+        canceled + ' canceled';
+
+      queueSummary.textContent =
+        waiting + ' waiting | ' +
+        downloading + ' active | ' +
+        done + ' done';
+    }
+
+    function applyMinimized(min) {
       var isMin = !!min;
-      list.style.display  = isMin ? 'none' : 'grid';
-      opts.style.display  = isMin ? 'none' : 'flex';
+      opts.style.display = isMin ? 'none' : 'flex';
+      body.style.display = isMin ? 'none' : 'grid';
       debugBox.style.display = isMin ? 'none' : 'block';
-      btnToggle.textContent  = isMin ? '▸' : '▾';
-      localStorage.setItem('gidx_minimized', isMin ? '1' : '0');
+      btnToggle.textContent = isMin ? '▸' : '▾';
+      localStorage.setItem(STORE.minKey, isMin ? '1' : '0');
     }
-    btnToggle.onclick = function(){
-      var cur = localStorage.getItem('gidx_minimized') === '1';
+
+    btnToggle.onclick = function () {
+      var cur = localStorage.getItem(STORE.minKey) === '1';
       applyMinimized(!cur);
     };
-    /* khôi phục trạng thái trước đó */
-    applyMinimized(localStorage.getItem('gidx_minimized') === '1');
 
-    /* expose */
-    wrap.__setStatus = function(t){ status.textContent = t; };
-    wrap.__setDebug  = function(t){ debugBox.textContent = t; try{ console.log('[gidx]', t); }catch(e){} };
-    wrap.__appendDebug = function(t){ debugBox.textContent += '\n' + t; try{ console.log('[gidx]', t); }catch(e){} };
-    wrap.__clearList = function(){ list.innerHTML = ''; };
-    wrap.__addItem = function(name, url){
-      var cb = document.createElement('input'); cb.type='checkbox'; cb.className='gidx-cb'; cb.dataset.url=url; cb.onchange=updateStatus;
-      var label = document.createElement('label'); label.textContent=name; label.style.userSelect='none'; label.style.whiteSpace='nowrap'; label.style.overflow='hidden'; label.style.textOverflow='ellipsis'; label.title=name;
-      list.appendChild(cb); list.appendChild(label);
+    btnSelectAll.onclick = function () {
+      $all('input.gidx-cb', fileList).forEach(function (cb) { cb.checked = true; });
+      updateFileStatus();
     };
-    wrap.__updateStatus = updateStatus;
-    wrap.__useEncoded = function(){ return !!encCb.checked; };
+
+    btnUnselect.onclick = function () {
+      $all('input.gidx-cb', fileList).forEach(function (cb) { cb.checked = false; });
+      updateFileStatus();
+    };
+
+    btnExport.onclick = function () {
+      var items = getSelectedItems();
+      if (!items.length) return alert('Chưa chọn file nào.');
+      var lines = items.map(function (x) { return x.url; });
+      var blob = new Blob([lines.join('\n') + '\n'], { type: 'text/plain;charset=utf-8' });
+      downloadBlob(blob, 'list.txt');
+    };
+
+    btnDownload.onclick = function () {
+      var items = getSelectedItems();
+      if (!items.length) return alert('Chưa chọn file nào.');
+
+      var added = 0;
+      items.forEach(function (it) {
+        var dedupeKey = it.url;
+        var old = jobsById[dedupeKey];
+        if (old && (old.state === 'waiting' || old.state === 'downloading')) return;
+        var job = makeJob(it.name || guessNameFromUrl(it.url), it.url);
+        jobsById[dedupeKey] = job;
+        queue.push(job);
+        renderOrUpdateJob(job);
+        added++;
+      });
+
+      updateFileStatus();
+      logLine('Queued ' + added + ' item(s).');
+      pumpQueue();
+    };
+
+    btnRetryFailed.onclick = function () {
+      var count = 0;
+      queue.forEach(function (job) {
+        if (job.state === 'error' || job.state === 'canceled') {
+          job.state = 'waiting';
+          job.loaded = 0;
+          job.total = 0;
+          job.error = '';
+          job.finishedAt = 0;
+          renderOrUpdateJob(job);
+          count++;
+        }
+      });
+      updateFileStatus();
+      logLine('Retry ' + count + ' item(s).');
+      pumpQueue();
+    };
+
+    btnClearDone.onclick = function () {
+      var kept = [];
+      queue.forEach(function (job) {
+        if (job.state === 'done') {
+          var row = $('#gidx-job-' + cssEscape(job.id));
+          if (row) row.remove();
+          delete jobsById[job.url];
+        } else {
+          kept.push(job);
+        }
+      });
+      queue = kept;
+      updateFileStatus();
+      logLine('Cleared done items.');
+    };
+
+    btnReload.onclick = function () {
+      init(true);
+    };
+
+    encCb.onchange = function () {
+      localStorage.setItem(STORE.encodedKey, encCb.checked ? '1' : '0');
+      logLine('Use encoded URL = ' + (encCb.checked ? 'ON' : 'OFF'));
+      init(true);
+    };
+
+    concInput.onchange = function () {
+      var v = parseInt(concInput.value || '2', 10);
+      if (!isFinite(v) || v < 1) v = 2;
+      if (v > 8) v = 8;
+      concInput.value = String(v);
+      localStorage.setItem(STORE.concKey, String(v));
+      updateFileStatus();
+      logLine('Concurrency = ' + v);
+      pumpQueue();
+    };
+
+    applyMinimized(localStorage.getItem(STORE.minKey) === '1');
+
+    wrap.__fileList = fileList;
+    wrap.__queueList = queueList;
+    wrap.__setStatus = function (t) { status.textContent = t; };
+    wrap.__clearFiles = function () { fileList.innerHTML = ''; };
+    wrap.__updateFileStatus = updateFileStatus;
+    wrap.__useEncoded = function () { return !!encCb.checked; };
+    wrap.__concurrency = function () { return getConcurrency(); };
+    wrap.__addFile = function (name, url) {
+      var cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.className = 'gidx-cb';
+      cb.dataset.url = url;
+      cb.dataset.name = name;
+      cb.onchange = updateFileStatus;
+
+      var label = document.createElement('label');
+      label.textContent = name;
+      label.title = name;
+      label.style.userSelect = 'none';
+      label.style.whiteSpace = 'nowrap';
+      label.style.overflow = 'hidden';
+      label.style.textOverflow = 'ellipsis';
+      label.style.minWidth = '0';
+
+      fileList.appendChild(cb);
+      fileList.appendChild(label);
+    };
+
     return wrap;
   }
 
-  /* ========== Sources ========== */
-  function joinURL(base, name, encoded){ return base + (encoded ? encodeURIComponent(String(name)) : String(name)); }
+  function cssEscape(str) {
+    return String(str).replace(/[^a-zA-Z0-9\-_:.]/g, '_');
+  }
 
-  /* S1: JSON endpoints phổ biến */
-  async function fetchJSONListing(log){
+  /* =========================
+   * queue UI rows
+   * ========================= */
+  function renderOrUpdateJob(job) {
+    var panel = ensurePanel();
+    var queueList = panel.__queueList;
+    var id = 'gidx-job-' + cssEscape(job.id);
+    var row = $('#' + id);
+
+    if (!row) {
+      row = document.createElement('div');
+      row.id = id;
+      row.style.border = '1px solid ' + C.border;
+      row.style.borderRadius = '12px';
+      row.style.padding = '8px';
+      row.style.background = C.bgSoft2;
+      row.style.display = 'grid';
+      row.style.gap = '6px';
+
+      var top = document.createElement('div');
+      top.style.display = 'flex';
+      top.style.alignItems = 'center';
+      top.style.gap = '8px';
+      top.style.minWidth = '0';
+
+      var name = document.createElement('div');
+      name.className = 'gidx-job-name';
+      name.style.flex = '1';
+      name.style.whiteSpace = 'nowrap';
+      name.style.overflow = 'hidden';
+      name.style.textOverflow = 'ellipsis';
+      name.style.fontWeight = '600';
+
+      var badge = document.createElement('span');
+      badge.className = 'gidx-job-badge';
+      badge.style.fontSize = '12px';
+      badge.style.padding = '2px 8px';
+      badge.style.borderRadius = '999px';
+      badge.style.background = C.chipBg;
+
+      top.appendChild(name);
+      top.appendChild(badge);
+
+      var meta = document.createElement('div');
+      meta.className = 'gidx-job-meta';
+      meta.style.fontSize = '12px';
+      meta.style.color = C.textDim;
+
+      var barWrap = document.createElement('div');
+      barWrap.style.height = '8px';
+      barWrap.style.borderRadius = '999px';
+      barWrap.style.background = '#1a1f27';
+      barWrap.style.overflow = 'hidden';
+
+      var bar = document.createElement('div');
+      bar.className = 'gidx-job-bar';
+      bar.style.height = '100%';
+      bar.style.width = '0%';
+      bar.style.background = C.blue;
+      bar.style.transition = 'width .15s linear';
+
+      barWrap.appendChild(bar);
+
+      var actions = document.createElement('div');
+      actions.style.display = 'flex';
+      actions.style.gap = '8px';
+
+      var btnCancel = mkBtn('Cancel');
+      btnCancel.className = 'gidx-job-cancel';
+      btnCancel.style.padding = '4px 8px';
+
+      var btnRemove = mkBtn('Remove');
+      btnRemove.className = 'gidx-job-remove';
+      btnRemove.style.padding = '4px 8px';
+
+      actions.appendChild(btnCancel);
+      actions.appendChild(btnRemove);
+
+      row.appendChild(top);
+      row.appendChild(meta);
+      row.appendChild(barWrap);
+      row.appendChild(actions);
+      queueList.appendChild(row);
+
+      btnCancel.onclick = function () {
+        if (job.state === 'waiting') {
+          job.state = 'canceled';
+          job.finishedAt = Date.now();
+          renderOrUpdateJob(job);
+          ensurePanel().__updateFileStatus();
+          logLine('Canceled waiting: ' + job.name);
+          return;
+        }
+        if (job.state === 'downloading' && job.controller) {
+          job.controller.abort();
+          return;
+        }
+      };
+
+      btnRemove.onclick = function () {
+        if (job.state === 'downloading') {
+          alert('File này đang tải. Hãy Cancel trước.');
+          return;
+        }
+        delete jobsById[job.url];
+        queue = queue.filter(function (x) { return x.id !== job.id; });
+        row.remove();
+        ensurePanel().__updateFileStatus();
+      };
+    }
+
+    $('.gidx-job-name', row).textContent = truncate(job.name, 80);
+
+    var badge = $('.gidx-job-badge', row);
+    badge.textContent = stateText(job);
+    badge.style.color = stateColor(job.state);
+
+    var meta = $('.gidx-job-meta', row);
+    if (job.state === 'downloading') {
+      if (job.total > 0) {
+        meta.textContent = fmtBytes(job.loaded) + ' / ' + fmtBytes(job.total);
+      } else {
+        meta.textContent = fmtBytes(job.loaded) + ' downloaded';
+      }
+    } else if (job.state === 'error') {
+      meta.textContent = job.error || 'Unknown error';
+    } else if (job.state === 'done') {
+      meta.textContent = job.total > 0 ? fmtBytes(job.total) : 'Completed';
+    } else {
+      meta.textContent = job.total > 0 ? fmtBytes(job.total) : '';
+    }
+
+    var bar = $('.gidx-job-bar', row);
+    if (job.state === 'done') {
+      bar.style.width = '100%';
+      bar.style.background = C.green;
+    } else if (job.state === 'error') {
+      bar.style.background = C.red;
+      bar.style.width = (job.total > 0 ? Math.max(2, Math.floor((job.loaded / job.total) * 100)) : 100) + '%';
+    } else if (job.state === 'canceled') {
+      bar.style.background = C.gray;
+      bar.style.width = (job.total > 0 ? Math.max(2, Math.floor((job.loaded / job.total) * 100)) : 20) + '%';
+    } else if (job.state === 'downloading') {
+      bar.style.background = C.blue;
+      bar.style.width = (job.total > 0 ? Math.max(2, Math.floor((job.loaded / job.total) * 100)) : 35) + '%';
+    } else {
+      bar.style.background = C.yellow;
+      bar.style.width = '2%';
+    }
+
+    var btnCancel = $('.gidx-job-cancel', row);
+    btnCancel.disabled = !(job.state === 'waiting' || job.state === 'downloading');
+    btnCancel.style.opacity = btnCancel.disabled ? '0.5' : '1';
+  }
+
+  /* =========================
+   * actual downloading
+   * ========================= */
+  async function runJob(job) {
+    job.state = 'downloading';
+    job.startedAt = Date.now();
+    job.error = '';
+    job.loaded = 0;
+    job.total = 0;
+    job.controller = new AbortController();
+    renderOrUpdateJob(job);
+    ensurePanel().__updateFileStatus();
+
+    logLine('Start: ' + job.name);
+
+    try {
+      var res = await fetch(job.url, {
+        method: 'GET',
+        credentials: 'same-origin',
+        signal: job.controller.signal
+      });
+
+      if (!res.ok) {
+        throw new Error('HTTP ' + res.status);
+      }
+
+      var len = parseInt(res.headers.get('content-length') || '0', 10);
+      if (isFinite(len) && len > 0) job.total = len;
+
+      var cd = res.headers.get('content-disposition') || '';
+      var fileName = job.name;
+
+      var matchUtf8 = /filename\*=UTF-8''([^;]+)/i.exec(cd);
+      var matchPlain = /filename="?([^"]+)"?/i.exec(cd);
+      if (matchUtf8 && matchUtf8[1]) {
+        fileName = sanitizeFileName(decodeURIComponent(matchUtf8[1]));
+      } else if (matchPlain && matchPlain[1]) {
+        fileName = sanitizeFileName(matchPlain[1]);
+      }
+
+      if (!res.body || !res.body.getReader) {
+        var fallbackBlob = await res.blob();
+        job.loaded = fallbackBlob.size || job.total || 0;
+        job.total = fallbackBlob.size || job.total || 0;
+        renderOrUpdateJob(job);
+        downloadBlob(fallbackBlob, fileName);
+        job.state = 'done';
+        job.finishedAt = Date.now();
+        renderOrUpdateJob(job);
+        ensurePanel().__updateFileStatus();
+        logLine('Done: ' + job.name);
+        return;
+      }
+
+      var reader = res.body.getReader();
+      var chunks = [];
+      while (true) {
+        var part = await reader.read();
+        if (part.done) break;
+        chunks.push(part.value);
+        job.loaded += part.value.byteLength || 0;
+        renderOrUpdateJob(job);
+      }
+
+      var blob = new Blob(chunks);
+      if (!job.total && blob.size) job.total = blob.size;
+      downloadBlob(blob, fileName);
+
+      job.state = 'done';
+      job.finishedAt = Date.now();
+      renderOrUpdateJob(job);
+      ensurePanel().__updateFileStatus();
+      logLine('Done: ' + job.name);
+    } catch (err) {
+      if (err && err.name === 'AbortError') {
+        job.state = 'canceled';
+        job.error = 'Canceled by user';
+        logLine('Canceled: ' + job.name);
+      } else {
+        job.state = 'error';
+        job.error = (err && err.message) ? err.message : String(err);
+        logLine('Error: ' + job.name + ' -> ' + job.error);
+      }
+      job.finishedAt = Date.now();
+      renderOrUpdateJob(job);
+      ensurePanel().__updateFileStatus();
+    } finally {
+      job.controller = null;
+    }
+  }
+
+  async function pumpQueue() {
+    if (isPumpRunning) return;
+    isPumpRunning = true;
+
+    try {
+      while (true) {
+        var limit = getConcurrency();
+
+        while (activeCount < limit) {
+          var next = queue.find(function (j) { return j.state === 'waiting'; });
+          if (!next) break;
+
+          activeCount++;
+          (function (job) {
+            runJob(job)
+              .catch(function (e) {
+                logLine('Unexpected error: ' + ((e && e.message) || String(e)));
+              })
+              .finally(function () {
+                activeCount--;
+                ensurePanel().__updateFileStatus();
+                pumpQueue();
+              });
+          })(next);
+        }
+
+        var hasWaiting = queue.some(function (j) { return j.state === 'waiting'; });
+        var hasDownloading = queue.some(function (j) { return j.state === 'downloading'; });
+
+        ensurePanel().__updateFileStatus();
+
+        if (!hasWaiting && !hasDownloading) break;
+        await sleep(250);
+      }
+    } finally {
+      isPumpRunning = false;
+    }
+  }
+
+  /* =========================
+   * source discovery
+   * ========================= */
+  function normalizeItemsFromAnyJSON(data) {
+    var out = [];
+
+    function pushItem(name, isFolder) {
+      if (!name) return;
+      name = String(name).trim();
+      if (!name || name === '.' || name === '..') return;
+      out.push({ name: name, isFolder: !!isFolder });
+    }
+
+    function walk(node, depth) {
+      if (!node || depth > 4) return;
+
+      if (Array.isArray(node)) {
+        node.forEach(function (it) {
+          if (!it) return;
+
+          if (typeof it === 'string') {
+            pushItem(it, false);
+            return;
+          }
+
+          if (typeof it === 'object') {
+            var name = it.name || it.filename || it.title || it.path;
+            var isFolder = !!(it.is_dir || it.isdir || it.isDirectory || it.type === 'folder' || it.mimeType === 'application/vnd.google-apps.folder');
+            if (name) pushItem(name, isFolder);
+          }
+        });
+        return;
+      }
+
+      if (typeof node === 'object') {
+        [
+          'files', 'data', 'items', 'children', 'list', 'objs'
+        ].forEach(function (k) {
+          if (node[k]) walk(node[k], depth + 1);
+        });
+      }
+    }
+
+    walk(data, 0);
+
+    var seen = Object.create(null);
+    return out.filter(function (it) {
+      var key = it.name + '|' + (it.isFolder ? 'd' : 'f');
+      if (seen[key]) return false;
+      seen[key] = 1;
+      return true;
+    });
+  }
+
+  async function fetchJSONListing() {
     var base = basePath();
     var trials = [
       location.href + (location.search ? '&' : '?') + 'json',
@@ -259,289 +944,134 @@
       location.href + (location.search ? '&' : '?') + 'format=json',
       base + '?format=json'
     ];
-    var tried = {};
-    for (var i=0;i<trials.length;i++){
-      var url = trials[i]; if (tried[url]) continue; tried[url]=1;
-      try{
-        var r = await fetch(url, { credentials:'omit' });
-        log('GET ' + url + ' -> ' + r.status + ' ' + (r.headers.get('content-type')||''));
-        if(!r.ok) continue;
-        var ct = (r.headers.get('content-type')||'').toLowerCase();
+
+    var tried = Object.create(null);
+
+    for (var i = 0; i < trials.length; i++) {
+      var url = trials[i];
+      if (tried[url]) continue;
+      tried[url] = 1;
+
+      try {
+        logLine('Try JSON: ' + url);
+        var res = await fetch(url, { credentials: 'same-origin' });
+        if (!res.ok) continue;
+        var ct = (res.headers.get('content-type') || '').toLowerCase();
         if (ct.indexOf('json') === -1) continue;
-        var data = await r.json();
-        var items = normalizeItemsFromAnyJSON(data).filter(function(it){ return looksLikeFileName(it.name) || it.isFolder; });
-        if (items.length) return { base: base, items: items };
-      }catch(e){ log('ERR ' + url + ' -> ' + (e && e.message ? e.message : String(e))); }
+
+        var data = await res.json();
+        var items = normalizeItemsFromAnyJSON(data).filter(function (it) {
+          return !it.isFolder && looksLikeFileName(it.name);
+        });
+
+        if (items.length) {
+          logLine('JSON listing ok: ' + items.length + ' file(s)');
+          return { base: base, items: items };
+        }
+      } catch (e) {
+        logLine('JSON error: ' + ((e && e.message) || String(e)));
+      }
     }
+
     return null;
   }
 
-  /* S2: DOM anchors */
-  function scrapeDOMAnchors(log){
-    var anchors = $all('a[href]');
-    log('DOM anchors count=' + anchors.length);
-    var out = [], seen = {};
-    for (var i=0;i<anchors.length;i++){
-      var a = anchors[i];
-      try{
-        var u = new URL(a.getAttribute('href'), location.href);
-        var name = decodeURIComponent((u.pathname.split('/').pop() || '').trim());
-        if (!name) continue;
-        var isDir = /\/$/.test(u.pathname) || /(\?|&)(id|path|p)=/.test(u.search) || name === '..' || name.toLowerCase()==='parent';
-        if (isDir) continue;
-        if (!looksLikeFileName(name)) continue;
-        var abs = u.href;
-        if (!seen[abs]){ seen[abs]=1; out.push({ name:name, url:abs }); }
-      }catch(e){}
-    }
-    /* data-* fallback */
-    var nodes = $all('[data-href],[data-url],[data-download]');
-    log('DOM data-* candidates=' + nodes.length);
-    for (var j=0;j<nodes.length;j++){
-      var el = nodes[j];
-      var url = el.getAttribute('data-href') || el.getAttribute('data-url') || el.getAttribute('data-download');
-      if (!url) continue;
-      try{
-        var u2 = new URL(url, location.href);
-        var n2 = decodeURIComponent((u2.pathname.split('/').pop()||'').trim());
-        if (!looksLikeFileName(n2)) continue;
-        var abs2 = u2.href;
-        if (!seen[abs2]){ seen[abs2]=1; out.push({ name:n2, url:abs2 }); }
-      }catch(e){}
-    }
-    return out;
-  }
-
-  /* S3: quét window.MODEL / UI / globals */
-  function scanWindowForListing(log){
-    var bases = [ safe(function(){return window.MODEL;}), safe(function(){return window.UI;}), window ];
-    var items = [];
-    for (var b=0;b<bases.length;b++){
-      var root = bases[b];
-      try{
-        var found = collectArraysWithFiles(root, 0, 3);
-        if (found.length){
-          log('window-scan found arrays=' + found.length);
-          for (var i=0;i<found.length;i++){
-            var arr = found[i];
-            for (var k=0;k<arr.length;k++){
-              var it = arr[k];
-              var name = it && (it.name || it.filename || it.title || (it.path? String(it.path).split('/').pop(): ''));
-              if (!name) continue;
-              var isFolder = !!(it.type===1 || it.isFolder===true || String(it.mime||'').toLowerCase()==='folder');
-              items.push({ name:String(name), isFolder:isFolder });
-            }
-          }
-        }
-      }catch(e){}
-    }
-    var seen = {}, dedup = [];
-    for (var t=0;t<items.length;t++){
-      var nm = items[t].name;
-      if (!looksLikeFileName(nm) && !items[t].isFolder) continue;
-      var key = nm + '|' + (items[t].isFolder?'1':'0');
-      if (!seen[key]){ seen[key]=1; dedup.push(items[t]); }
-    }
-    return dedup;
-  }
-  function collectArraysWithFiles(obj, depth, maxDepth){
-    var out = [];
-    if (!obj || depth>maxDepth) return out;
-    if (Array.isArray(obj)){
-      var good = obj.filter(function(x){ return x && (x.name || x.filename || x.title || x.path); });
-      if (good.length >= Math.min(2, obj.length)) out.push(obj);
-      return out;
-    }
-    if (typeof obj === 'object'){
-      var keys = Object.keys(obj); if (keys.length>1000) return out;
-      for (var i=0;i<keys.length;i++){
-        var v = obj[keys[i]];
-        try{ out = out.concat(collectArraysWithFiles(v, depth+1, maxDepth)); }catch(e){}
-      }
-    }
-    return out;
-  }
-
-  /* S4: sniff fetch/XHR */
-  (function setupSniffers(){
-    if (window.__gidx_sniffer_installed) return;
-    window.__gidx_sniffer_installed = true;
-
-    function pushJson(j){
-      try{
-        var items = normalizeItemsFromAnyJSON(j).filter(function(it){ return looksLikeFileName(it.name) || it.isFolder; });
-        if (items.length){ window.__GIDX_SEEN_ITEMS__ = items; }
-      }catch(e){}
-    }
-
-    var ofetch = window.fetch;
-    if (ofetch){
-      window.fetch = function(input, init){
-        return ofetch(input, init).then(function(res){
-          try{
-            var ct = (res.headers && res.headers.get('content-type') || '').toLowerCase();
-            if (ct.indexOf('json') !== -1){ res.clone().json().then(pushJson).catch(function(){}); }
-          }catch(e){}
-          return res;
-        });
-      };
-    }
-
-    var OXHR = window.XMLHttpRequest;
-    if (OXHR){
-      function PXHR(){ var x = new OXHR(); return x; }
-      PXHR.prototype = OXHR.prototype;
-      window.XMLHttpRequest = PXHR;
-      var open = OXHR.prototype.open, send = OXHR.prototype.send;
-      PXHR.prototype.open = function(){ this.__gidx_method = arguments[0]; this.__gidx_url = arguments[1]; return open.apply(this, arguments); };
-      PXHR.prototype.send = function(){
-        this.addEventListener('load', function(){
-          try{
-            var ct = (this.getResponseHeader && this.getResponseHeader('content-type') || '').toLowerCase();
-            if (ct.indexOf('json') !== -1){
-              var txt = this.responseText; try{ pushJson(JSON.parse(txt)); }catch(e){}
-            }
-          }catch(e){}
-        });
-        return send.apply(this, arguments);
-      };
-    }
-  })();
-
-  /* JSON normalizer */
-  function normalizeItemsFromAnyJSON(data){
-    var items = [];
-    try{
-      if (Array.isArray(data)) items = data;
-      else if (Array.isArray(data.files)) items = data.files;
-      else if (Array.isArray(data.data)) items = data.data;
-      else if (data.list && Array.isArray(data.list)) items = data.list;
-      else if (data.children && Array.isArray(data.children)) items = data.children;
-      else if (data.items && Array.isArray(data.items)) items = data.items;
-    }catch(e){ items = []; }
-    if (!items || !items.length) return [];
-    return items.map(function(it){
-      var name = it && (it.name || it.filename || it.title || (it.path? String(it.path).split('/').pop(): ''));
-      var fold = !!(it && (it.type===1 || it.isFolder===true || String(it.mime||'').toLowerCase()==='folder'));
-      return name ? { name:String(name), isFolder:fold } : null;
-    }).filter(function(x){ return !!x; });
-  }
-
-  /* S5: scraper dành riêng cho alx-xlx: đọc cột "File" trong bảng */
-  function scrapeAlxTable(log){
-    var tables = document.querySelectorAll('table');
-    if (!tables || !tables.length) { log('alx-table: no <table>'); return []; }
-    var target = null;
-    for (var i=0;i<tables.length;i++){
-      var t = tables[i];
-      var head = t.querySelector('thead') || t;
-      var txt = (head.textContent || '').toLowerCase();
-      if (txt.indexOf('file') !== -1 && (txt.indexOf('modified') !== -1 || txt.indexOf('size') !== -1)) { target = t; break; }
-    }
-    if (!target) { log('alx-table: no header match'); return []; }
-
-    var rows = target.querySelectorAll('tbody tr, tr');
-    var out = [];
-    for (var r=0;r<rows.length;r++){
-      var tr = rows[r];
-      var firstCell = tr.querySelector('td') || tr.children[0];
-      if (!firstCell) continue;
-      var name = (firstCell.textContent || '').replace(/\u00A0/g,' ').trim();
-      if (!name) continue;
-      if (/[\/\\]$/.test(name)) continue;
-      if (!looksLikeFileName(name)) continue;
-      out.push({ name: name });
-    }
-    return out;
-  }
-
-  /* ========== init flow ========== */
-  async function init(force){
-    var panel = ensurePanel();
-    if (!force && panel.__initing) return;
-    panel.__initing = true;
-    panel.__setStatus('Đang nạp…');
-    panel.__setDebug('Starting…');
-    panel.__clearList();
-
-    function log(line){ panel.__appendDebug(line); }
-
+  function scrapeDOMAnchors() {
     var base = basePath();
+    var anchors = $all('a[href]');
+    var out = [];
+    var seen = Object.create(null);
 
-    /* 1) JSON endpoints */
-    var listing = await fetchJSONListing(log);
-    if (listing && listing.items && listing.items.length){
-      var files = listing.items.filter(function(it){ return !it.isFolder && looksLikeFileName(it.name); });
-      log('JSON ok: total=' + listing.items.length + ', files=' + files.length);
-      if (files.length){
-        var enc = panel.__useEncoded();
-        for (var i=0;i<files.length;i++){ panel.__addItem(files[i].name, joinURL(base, files[i].name, enc)); }
-        panel.__setStatus('Sẵn sàng (JSON)'); panel.__updateStatus(); panel.__initing = false; return;
-      }
-    }
+    anchors.forEach(function (a) {
+      var href = a.getAttribute('href') || '';
+      var text = (a.textContent || '').trim();
 
-    /* 2) sniffer */
-    var sniff = window.__GIDX_SEEN_ITEMS__;
-    if (sniff && sniff.length){
-      var files2 = sniff.filter(function(x){ return !x.isFolder && looksLikeFileName(x.name); });
-      log('Sniffer ok: files=' + files2.length);
-      if (files2.length){
-        var enc2 = panel.__useEncoded();
-        for (var s=0;s<files2.length;s++){ panel.__addItem(files2[s].name, joinURL(base, files2[s].name, enc2)); }
-        panel.__setStatus('Sẵn sàng (sniff)'); panel.__updateStatus(); panel.__initing = false; return;
-      }
-    }
+      if (!text || text === '..' || text.toLowerCase() === 'parent') return;
+      if (!looksLikeFileName(text)) return;
+      if (/\/$/.test(href)) return;
 
-    /* 3) window scan */
-    var winItems = scanWindowForListing(log);
-    if (winItems && winItems.length){
-      var files3 = winItems.filter(function(x){ return !x.isFolder && looksLikeFileName(x.name); });
-      log('window-scan: files=' + files3.length + ' (from ' + winItems.length + ' items)');
-      if (files3.length){
-        var enc3 = panel.__useEncoded();
-        for (var w=0; w<files3.length; w++){ panel.__addItem(files3[w].name, joinURL(base, files3[w].name, enc3)); }
-        panel.__setStatus('Sẵn sàng (window)'); panel.__updateStatus(); panel.__initing = false; return;
-      }
-    }
+      var url = safe(function () { return new URL(href, location.href).href; }, '');
+      if (!url) return;
 
-    /* 4) alx-xlx table scraper */
-    var alx = scrapeAlxTable(log);
-    if (alx && alx.length){
-      var filesA = alx.filter(function(x){ return looksLikeFileName(x.name); });
-      log('alx-table: files=' + filesA.length);
-      if (filesA.length){
-        var encA = panel.__useEncoded();
-        for (var a=0;a<filesA.length;a++){ panel.__addItem(filesA[a].name, joinURL(base, filesA[a].name, encA)); }
-        panel.__setStatus('Sẵn sàng (alx-table)'); panel.__updateStatus(); panel.__initing = false; return;
-      }
-    }
+      if (seen[url]) return;
+      seen[url] = 1;
 
-    /* 5) DOM anchors */
-    var anchors = scrapeDOMAnchors(log);
-    if (anchors.length){
-      log('DOM scrape: files=' + anchors.length);
-      for (var j=0;j<anchors.length;j++){ panel.__addItem(anchors[j].name, anchors[j].url); }
-      panel.__setStatus('Sẵn sàng (DOM)'); panel.__updateStatus(); panel.__initing = false; return;
-    }
+      out.push({
+        name: text,
+        url: url
+      });
+    });
 
-    panel.__setStatus('Không lấy được danh sách');
-    log('No source produced items.');
-    panel.__initing = false;
+    logLine('DOM anchors: ' + out.length + ' file(s)');
+    return out.length ? out : null;
   }
 
-  if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', function(){ init(true); }); }
-  else { init(true); }
+  async function discoverFiles() {
+    var panel = ensurePanel();
+    var encoded = panel.__useEncoded();
+    var json = await fetchJSONListing();
 
-  /* re-init khi SPA đổi URL / DOM */
-  (function(){
-    var oldHref = location.href;
-    var obs = new MutationObserver(function(){ if (oldHref !== location.href) { oldHref = location.href; init(true); } });
-    if (document.body) obs.observe(document.body, {childList:true,subtree:true});
-    ['pushState','replaceState'].forEach(function(m){
-      var orig = history[m]; if (!orig) return;
-      history[m] = function(){ var ret = orig.apply(this, arguments); try { window.dispatchEvent(new Event('locationchange')); } catch(e){} return ret; };
+    if (json && json.items && json.items.length) {
+      return json.items.map(function (it) {
+        return {
+          name: it.name,
+          url: joinURL(json.base, it.name, encoded)
+        };
+      });
+    }
+
+    var dom = scrapeDOMAnchors();
+    if (dom && dom.length) return dom;
+
+    return [];
+  }
+
+  /* =========================
+   * init
+   * ========================= */
+  async function init(force) {
+    var panel = ensurePanel();
+    panel.__clearFiles();
+    panel.__setStatus('Scanning files…');
+
+    if (force) {
+      logLine('Reload requested.');
+    }
+
+    try {
+      var files = await discoverFiles();
+      if (!files.length) {
+        panel.__setStatus('Không tìm thấy file nào trên trang này.');
+        logLine('No files found.');
+        return;
+      }
+
+      files.sort(function (a, b) {
+        return String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' });
+      });
+
+      files.forEach(function (f) {
+        panel.__addFile(f.name, f.url);
+      });
+
+      panel.__updateFileStatus();
+      logLine('Loaded ' + files.length + ' file(s).');
+    } catch (e) {
+      panel.__setStatus('Lỗi khi load danh sách file.');
+      logLine('Init error: ' + ((e && e.message) || String(e)));
+    }
+  }
+
+  /* =========================
+   * boot
+   * ========================= */
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () {
+      ensurePanel();
+      init(false);
     });
-    window.addEventListener('locationchange', function(){ init(true); });
-    setInterval(function(){ if (!document.body.contains($('#gidx-panel'))) { ensurePanel(); } }, 1000);
-  })();
+  } else {
+    ensurePanel();
+    init(false);
+  }
 })();
