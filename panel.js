@@ -1,30 +1,18 @@
-/* panel.js - GoIndex Batch Download Panel with Queue (2 concurrent by default)
- * Works with alx-xlx/goindex frontend.
- * Features:
- * - Batch select/download
- * - Real queue with configurable concurrency
- * - Per-file states: waiting / downloading / done / error / canceled
- * - Progress display
- * - Retry failed
- * - Clear done
- * - Encoded URL option
- *
- * Note:
- * - Uses fetch + blob so the queue knows exactly when a download finishes.
- * - Large files can consume browser memory. For very large files, a StreamSaver.js variant is better.
+/* panel.js - GoIndex Batch Download Panel with Queue
+ * - Better file discovery
+ * - Waits for delayed DOM rendering
+ * - Real queue download
+ * - Default concurrency: 2
+ * - Button label: Download Selected
  */
 (function () {
   'use strict';
 
-  /* =========================
-   * tiny utils
-   * ========================= */
   function $(s, r) { return (r || document).querySelector(s); }
   function $all(s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); }
   function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-  function safe(fn, fallback) {
-    try { return fn(); } catch (e) { return fallback; }
-  }
+  function safe(fn, fallback) { try { return fn(); } catch (e) { return fallback; } }
+
   function fmtBytes(n) {
     if (!isFinite(n) || n <= 0) return '0 B';
     var u = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -33,20 +21,32 @@
     var v = n / Math.pow(1024, i);
     return (v >= 100 || i === 0 ? v.toFixed(0) : v >= 10 ? v.toFixed(1) : v.toFixed(2)) + ' ' + u[i];
   }
+
   function fmtPct(done, total) {
     if (!total || total <= 0) return '...';
     var pct = Math.floor((done / total) * 100);
     pct = Math.max(0, Math.min(100, pct));
     return pct + '%';
   }
+
   function truncate(s, n) {
     s = String(s || '');
     return s.length > n ? s.slice(0, n - 1) + '…' : s;
   }
+
   function sanitizeFileName(name) {
     name = String(name || 'download');
     return name.replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/\s+/g, ' ').trim() || 'download';
   }
+
+  function cssEscape(str) {
+    return String(str).replace(/[^a-zA-Z0-9\-_:.]/g, '_');
+  }
+
+  function basePath() {
+    return location.origin + location.pathname.replace(/\/+$/, '') + '/';
+  }
+
   function logLine(msg) {
     var box = $('#gidx-debug');
     if (!box) return;
@@ -57,19 +57,6 @@
     box.textContent += '\n[' + hh + ':' + mm + ':' + ss + '] ' + msg;
     box.scrollTop = box.scrollHeight;
     try { console.log('[gidx]', msg); } catch (e) {}
-  }
-
-  function basePath() {
-    return location.origin + location.pathname.replace(/\/+$/, '') + '/';
-  }
-
-  function looksLikeFileName(name) {
-    if (!name || typeof name !== 'string') return false;
-    var raw = name.trim();
-    if (!raw) return false;
-    if (raw === '..' || raw.toLowerCase() === 'parent') return false;
-    if (/^(aswift|gB|fB|gf|fb|ads?|adserver|_.*)$/i.test(raw)) return false;
-    return /\.[a-z0-9]{1,12}$/i.test(raw);
   }
 
   function joinURL(base, name, encoded) {
@@ -97,9 +84,6 @@
     }, 30000);
   }
 
-  /* =========================
-   * theme
-   * ========================= */
   var C = {
     bg: '#2b2f36',
     bgSoft: '#323843',
@@ -121,9 +105,6 @@
     gray: '#64748b'
   };
 
-  /* =========================
-   * store / settings
-   * ========================= */
   var STORE = {
     minKey: 'gidx_minimized',
     encodedKey: 'gidx_use_encoded',
@@ -137,21 +118,19 @@
     return v;
   }
 
-  /* =========================
-   * queue state
-   * ========================= */
   var queue = [];
   var jobsById = Object.create(null);
   var activeCount = 0;
   var isPumpRunning = false;
   var nextJobId = 1;
+  var __gidxObserverBound = false;
 
   function makeJob(name, url) {
     return {
       id: String(nextJobId++),
       name: name,
       url: url,
-      state: 'waiting', // waiting/downloading/done/error/canceled
+      state: 'waiting',
       loaded: 0,
       total: 0,
       error: '',
@@ -185,9 +164,6 @@
     }
   }
 
-  /* =========================
-   * UI
-   * ========================= */
   function mkBtn(text) {
     var b = document.createElement('button');
     b.textContent = text;
@@ -248,7 +224,7 @@
 
     var btnSelectAll = mkBtn('Select all');
     var btnUnselect = mkBtn('Unselect');
-    var btnDownload = mkBtn('Queue selected');
+    var btnDownload = mkBtn('Download Selected');
     var btnExport = mkBtn('Export list');
     var btnReload = mkBtn('Reload');
     var btnRetryFailed = mkBtn('Retry failed');
@@ -589,13 +565,6 @@
     return wrap;
   }
 
-  function cssEscape(str) {
-    return String(str).replace(/[^a-zA-Z0-9\-_:.]/g, '_');
-  }
-
-  /* =========================
-   * queue UI rows
-   * ========================= */
   function renderOrUpdateJob(job) {
     var panel = ensurePanel();
     var queueList = panel.__queueList;
@@ -748,9 +717,6 @@
     btnCancel.style.opacity = btnCancel.disabled ? '0.5' : '1';
   }
 
-  /* =========================
-   * actual downloading
-   * ========================= */
   async function runJob(job) {
     job.state = 'downloading';
     job.startedAt = Date.now();
@@ -878,9 +844,22 @@
     }
   }
 
-  /* =========================
-   * source discovery
-   * ========================= */
+  function looksLikeFileName(name) {
+    if (!name || typeof name !== 'string') return false;
+    var raw = name.trim();
+    if (!raw) return false;
+    if (raw === '..' || raw.toLowerCase() === 'parent') return false;
+
+    if (/^(select all|unselect|download selected|queue selected|export list|reload|retry failed|clear done|files|queue)$/i.test(raw)) {
+      return false;
+    }
+
+    if (/\.[a-z0-9]{1,16}$/i.test(raw)) return true;
+    if (!/[\/\\]/.test(raw) && raw.length > 1 && raw.length < 260) return true;
+
+    return false;
+  }
+
   function normalizeItemsFromAnyJSON(data) {
     var out = [];
 
@@ -913,9 +892,7 @@
       }
 
       if (typeof node === 'object') {
-        [
-          'files', 'data', 'items', 'children', 'list', 'objs'
-        ].forEach(function (k) {
+        ['files', 'data', 'items', 'children', 'list', 'objs'].forEach(function (k) {
           if (node[k]) walk(node[k], depth + 1);
         });
       }
@@ -977,40 +954,105 @@
   }
 
   function scrapeDOMAnchors() {
-    var base = basePath();
-    var anchors = $all('a[href]');
     var out = [];
     var seen = Object.create(null);
 
-    anchors.forEach(function (a) {
-      var href = a.getAttribute('href') || '';
-      var text = (a.textContent || '').trim();
-
-      if (!text || text === '..' || text.toLowerCase() === 'parent') return;
-      if (!looksLikeFileName(text)) return;
-      if (/\/$/.test(href)) return;
-
-      var url = safe(function () { return new URL(href, location.href).href; }, '');
-      if (!url) return;
-
+    function addItem(name, url) {
+      name = String(name || '').trim();
+      url = String(url || '').trim();
+      if (!name || !url) return;
+      if (!looksLikeFileName(name)) return;
       if (seen[url]) return;
       seen[url] = 1;
+      out.push({ name: name, url: url });
+    }
 
-      out.push({
-        name: text,
-        url: url
-      });
+    function filenameFromHref(href) {
+      try {
+        var u = new URL(href, location.href);
+        var p = u.pathname || '';
+        var seg = p.split('/').filter(Boolean).pop() || '';
+        seg = decodeURIComponent(seg);
+
+        if (!seg) return '';
+        if (seg === '0:' || seg === '1:' || /^index\.(html?|php)$/i.test(seg)) return '';
+        return seg;
+      } catch (e) {
+        return '';
+      }
+    }
+
+    function normalizeUrl(href) {
+      try {
+        return new URL(href, location.href).href;
+      } catch (e) {
+        return '';
+      }
+    }
+
+    $all('a[href]').forEach(function (a) {
+      var href = a.getAttribute('href') || '';
+      if (!href) return;
+      if (href.startsWith('#')) return;
+      if (/^(javascript:|mailto:)/i.test(href)) return;
+
+      var url = normalizeUrl(href);
+      if (!url) return;
+      if (url.indexOf(location.origin) !== 0) return;
+
+      var text = (a.textContent || '').trim();
+      var name = '';
+
+      if (looksLikeFileName(text)) {
+        name = text;
+      } else {
+        name = filenameFromHref(url);
+      }
+
+      if (/\/$/.test(href)) return;
+      if (!name) return;
+
+      addItem(name, url);
     });
 
-    logLine('DOM anchors: ' + out.length + ' file(s)');
+    $all('[data-href], [data-url], [onclick]').forEach(function (el) {
+      var href = el.getAttribute('data-href') || el.getAttribute('data-url') || '';
+      var onclick = el.getAttribute('onclick') || '';
+      var m = onclick.match(/['"]([^'"]+)['"]/);
+
+      if (!href && m) href = m[1];
+      if (!href) return;
+      if (/^(javascript:|mailto:|#)/i.test(href)) return;
+
+      var url = normalizeUrl(href);
+      if (!url) return;
+      if (url.indexOf(location.origin) !== 0) return;
+
+      var text = (el.textContent || '').trim();
+      var name = looksLikeFileName(text) ? text : filenameFromHref(url);
+      if (!name) return;
+
+      addItem(name, url);
+    });
+
+    out = out.filter(function (it) {
+      var name = (it.name || '').trim();
+      if (!name) return false;
+      if (name === '..') return false;
+      if (/^(favicon\.ico)$/i.test(name)) return false;
+      if (/^(workers\.dev|googleusercontent\.com)$/i.test(name)) return false;
+      return true;
+    });
+
+    logLine('DOM anchors/items: ' + out.length + ' file(s)');
     return out.length ? out : null;
   }
 
   async function discoverFiles() {
     var panel = ensurePanel();
     var encoded = panel.__useEncoded();
-    var json = await fetchJSONListing();
 
+    var json = await fetchJSONListing();
     if (json && json.items && json.items.length) {
       return json.items.map(function (it) {
         return {
@@ -1020,15 +1062,15 @@
       });
     }
 
-    var dom = scrapeDOMAnchors();
-    if (dom && dom.length) return dom;
+    for (var i = 0; i < 8; i++) {
+      var dom = scrapeDOMAnchors();
+      if (dom && dom.length) return dom;
+      await sleep(500);
+    }
 
     return [];
   }
 
-  /* =========================
-   * init
-   * ========================= */
   async function init(force) {
     var panel = ensurePanel();
     panel.__clearFiles();
@@ -1040,14 +1082,57 @@
 
     try {
       var files = await discoverFiles();
+
       if (!files.length) {
-        panel.__setStatus('Không tìm thấy file nào trên trang này.');
-        logLine('No files found.');
+        panel.__setStatus('Chưa quét được file. Đang chờ trang render...');
+        logLine('No files found. Waiting for DOM changes...');
+
+        if (!__gidxObserverBound) {
+          __gidxObserverBound = true;
+
+          var timer = null;
+          var observer = new MutationObserver(function () {
+            clearTimeout(timer);
+            timer = setTimeout(async function () {
+              var p = ensurePanel();
+
+              if ($all('input.gidx-cb', p.__fileList).length > 0) return;
+
+              var retryFiles = await discoverFiles();
+              if (!retryFiles.length) return;
+
+              p.__clearFiles();
+              retryFiles.sort(function (a, b) {
+                return String(a.name).localeCompare(String(b.name), undefined, {
+                  numeric: true,
+                  sensitivity: 'base'
+                });
+              });
+
+              retryFiles.forEach(function (f) {
+                p.__addFile(f.name, f.url);
+              });
+
+              p.__updateFileStatus();
+              p.__setStatus('Đã quét được ' + retryFiles.length + ' file(s).');
+              logLine('Observer loaded ' + retryFiles.length + ' file(s).');
+            }, 400);
+          });
+
+          observer.observe(document.body, {
+            childList: true,
+            subtree: true
+          });
+        }
+
         return;
       }
 
       files.sort(function (a, b) {
-        return String(a.name).localeCompare(String(b.name), undefined, { numeric: true, sensitivity: 'base' });
+        return String(a.name).localeCompare(String(b.name), undefined, {
+          numeric: true,
+          sensitivity: 'base'
+        });
       });
 
       files.forEach(function (f) {
@@ -1055,6 +1140,7 @@
       });
 
       panel.__updateFileStatus();
+      panel.__setStatus('Đã quét được ' + files.length + ' file(s).');
       logLine('Loaded ' + files.length + ' file(s).');
     } catch (e) {
       panel.__setStatus('Lỗi khi load danh sách file.');
@@ -1062,9 +1148,6 @@
     }
   }
 
-  /* =========================
-   * boot
-   * ========================= */
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', function () {
       ensurePanel();
