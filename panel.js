@@ -1,4 +1,4 @@
-/* panel.js – GoIndex Batch Download (no ZIP) – Dark UI + Minimize + Soft Queue */
+/* panel.js – GoIndex Batch Download (no ZIP) – Dark UI + Minimize + Soft Sequential Queue */
 (function(){
   /* ========== tiny utils ========== */
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
@@ -35,13 +35,21 @@
 
   var STORE = {
     minimized: 'gidx_minimized',
-    concurrency: 'gidx_concurrency'
+    concurrency: 'gidx_concurrency',
+    delay: 'gidx_delay_ms'
   };
 
   function getConcurrency(){
     var v = parseInt(localStorage.getItem(STORE.concurrency) || '2', 10);
     if (!isFinite(v) || v < 1) v = 2;
     if (v > 8) v = 8;
+    return v;
+  }
+
+  function getDelayMs(){
+    var v = parseInt(localStorage.getItem(STORE.delay) || '2000', 10);
+    if (!isFinite(v) || v < 300) v = 2000;
+    if (v > 15000) v = 15000;
     return v;
   }
 
@@ -55,8 +63,8 @@
     wrap.style.right = '16px';
     wrap.style.bottom = '16px';
     wrap.style.zIndex = '2147483647';
-    wrap.style.width = 'min(440px, 92vw)';
-    wrap.style.maxHeight = '68vh';
+    wrap.style.width = 'min(460px, 92vw)';
+    wrap.style.maxHeight = '72vh';
     wrap.style.overflow = 'hidden';
     wrap.style.background = C.bg;
     wrap.style.border = '1px solid ' + C.border;
@@ -168,6 +176,29 @@
     ccWrap.appendChild(ccInput);
     opts.appendChild(ccWrap);
 
+    var delayWrap = document.createElement('label');
+    delayWrap.style.display = 'inline-flex';
+    delayWrap.style.alignItems = 'center';
+    delayWrap.style.gap = '6px';
+    var delayTxt = document.createElement('span');
+    delayTxt.textContent = 'Delay(ms)';
+    delayTxt.style.color = C.textDim;
+    var delayInput = document.createElement('input');
+    delayInput.type = 'number';
+    delayInput.min = '300';
+    delayInput.max = '15000';
+    delayInput.step = '100';
+    delayInput.value = String(getDelayMs());
+    delayInput.style.width = '78px';
+    delayInput.style.padding = '4px 6px';
+    delayInput.style.borderRadius = '8px';
+    delayInput.style.border = '1px solid ' + C.btnBorder;
+    delayInput.style.background = C.bg;
+    delayInput.style.color = C.text;
+    delayWrap.appendChild(delayTxt);
+    delayWrap.appendChild(delayInput);
+    opts.appendChild(delayWrap);
+
     /* list area */
     var list = document.createElement('div');
     list.id = 'gidx-list';
@@ -187,7 +218,7 @@
     debugBox.style.borderTop = '1px solid ' + C.border;
     debugBox.style.background = C.debugBg;
     debugBox.style.color = C.textDim;
-    debugBox.style.maxHeight = '20vh';
+    debugBox.style.maxHeight = '22vh';
     debugBox.style.overflow = 'auto';
     debugBox.style.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
     debugBox.textContent = 'Debug log will appear here…';
@@ -241,31 +272,28 @@
         var items = getSelectedItems();
         if (!items.length) return alert('Chưa chọn file nào.');
 
+        /* Giữ input để UI không bị "lạ", nhưng bản mềm này chỉ dùng tuần tự */
         var concurrency = parseInt(ccInput.value || '2', 10);
         if (!isFinite(concurrency) || concurrency < 1) concurrency = 2;
         if (concurrency > 8) concurrency = 8;
         ccInput.value = String(concurrency);
         localStorage.setItem(STORE.concurrency, String(concurrency));
 
-        /* queue mềm: giới hạn số lượt KHỞI TẠO download cùng lúc */
-        var q = items.slice();
-        var started = 0;
-        var total = q.length;
+        var delayMs = parseInt(delayInput.value || '2000', 10);
+        if (!isFinite(delayMs) || delayMs < 300) delayMs = 2000;
+        if (delayMs > 15000) delayMs = 15000;
+        delayInput.value = String(delayMs);
+        localStorage.setItem(STORE.delay, String(delayMs));
 
-        /* có thể tăng giảm nếu browser chặn hoặc tải khởi tạo quá nhanh */
-        var DELAY_BETWEEN_STARTS_MS = 1200;
-
+        /* queue mềm thực tế: tuần tự để tránh browser bắn đồng thời */
         function triggerDownload(item){
           try{
             var a = document.createElement('a');
             a.href = item.url;
             a.rel = 'noreferrer';
-
-            /* không target _blank để tránh popup/new tab */
             try{
               a.download = item.name || decodeURIComponent((new URL(item.url)).pathname.split('/').pop() || '');
             }catch(e){}
-
             document.body.appendChild(a);
             a.click();
             a.remove();
@@ -275,34 +303,22 @@
           }
         }
 
-        async function worker(workerId){
-          while(q.length){
-            var item = q.shift();
-            if (!item) break;
+        wrap.__appendDebug('[DL] Sequential start: total=' + items.length + ', configured concurrency=' + concurrency + ', delay=' + delayMs + 'ms');
 
-            started++;
-            updateStatus('starting ' + started + '/' + total);
+        for (var i = 0; i < items.length; i++) {
+          var item = items[i];
+          updateStatus((i + 1) + '/' + items.length + ' starting');
 
-            var ok = triggerDownload(item);
-            wrap.__appendDebug(
-              '[DL] worker=' + workerId +
-              ' | ' + (ok ? 'OK' : 'FAIL') +
-              ' | ' + (item.name || item.url)
-            );
+          var ok = triggerDownload(item);
+          wrap.__appendDebug('[DL] ' + (ok ? 'OK' : 'FAIL') + ' | ' + (item.name || item.url));
 
-            await sleep(DELAY_BETWEEN_STARTS_MS);
+          if (i < items.length - 1) {
+            await sleep(delayMs);
           }
         }
 
-        wrap.__appendDebug('[DL] Start queue: total=' + total + ', concurrency=' + concurrency);
-        updateStatus('queue ' + total);
-
-        var workers = [];
-        for (var i = 0; i < concurrency; i++) workers.push(worker(i + 1));
-        await Promise.all(workers);
-
-        updateStatus('queue started');
-        wrap.__appendDebug('[DL] Queue finished starting all downloads.');
+        updateStatus('all start commands sent');
+        wrap.__appendDebug('[DL] Done sending all start commands.');
       })();
     };
 
@@ -314,6 +330,14 @@
       if (v > 8) v = 8;
       ccInput.value = String(v);
       localStorage.setItem(STORE.concurrency, String(v));
+    };
+
+    delayInput.onchange = function(){
+      var v = parseInt(delayInput.value || '2000', 10);
+      if (!isFinite(v) || v < 300) v = 2000;
+      if (v > 15000) v = 15000;
+      delayInput.value = String(v);
+      localStorage.setItem(STORE.delay, String(v));
     };
 
     /* minimize / expand */
