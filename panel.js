@@ -1,9 +1,5 @@
 /* panel.js - GoIndex Batch Download Panel with Queue
- * - Better file discovery
- * - Waits for delayed DOM rendering
- * - Real queue download
- * - Default concurrency: 2
- * - Button label: Download Selected
+ * Robust DOM text scanner edition
  */
 (function () {
   'use strict';
@@ -43,20 +39,8 @@
     return String(str).replace(/[^a-zA-Z0-9\-_:.]/g, '_');
   }
 
-  function basePath() {
+  function currentDirUrl() {
     return location.origin + location.pathname.replace(/\/+$/, '') + '/';
-  }
-
-  function logLine(msg) {
-    var box = $('#gidx-debug');
-    if (!box) return;
-    var now = new Date();
-    var hh = String(now.getHours()).padStart(2, '0');
-    var mm = String(now.getMinutes()).padStart(2, '0');
-    var ss = String(now.getSeconds()).padStart(2, '0');
-    box.textContent += '\n[' + hh + ':' + mm + ':' + ss + '] ' + msg;
-    box.scrollTop = box.scrollHeight;
-    try { console.log('[gidx]', msg); } catch (e) {}
   }
 
   function joinURL(base, name, encoded) {
@@ -69,6 +53,18 @@
       var raw = u.pathname.split('/').pop() || 'download';
       return sanitizeFileName(decodeURIComponent(raw));
     }, 'download');
+  }
+
+  function logLine(msg) {
+    var box = $('#gidx-debug');
+    if (!box) return;
+    var now = new Date();
+    var hh = String(now.getHours()).padStart(2, '0');
+    var mm = String(now.getMinutes()).padStart(2, '0');
+    var ss = String(now.getSeconds()).padStart(2, '0');
+    box.textContent += '\n[' + hh + ':' + mm + ':' + ss + '] ' + msg;
+    box.scrollTop = box.scrollHeight;
+    try { console.log('[gidx]', msg); } catch (e) {}
   }
 
   function downloadBlob(blob, name) {
@@ -394,10 +390,7 @@
 
     function getSelectedItems() {
       return $all('input.gidx-cb:checked', fileList).map(function (cb) {
-        return {
-          name: cb.dataset.name,
-          url: cb.dataset.url
-        };
+        return { name: cb.dataset.name, url: cb.dataset.url };
       });
     }
 
@@ -540,7 +533,6 @@
     wrap.__clearFiles = function () { fileList.innerHTML = ''; };
     wrap.__updateFileStatus = updateFileStatus;
     wrap.__useEncoded = function () { return !!encCb.checked; };
-    wrap.__concurrency = function () { return getConcurrency(); };
     wrap.__addFile = function (name, url) {
       var cb = document.createElement('input');
       cb.type = 'checkbox';
@@ -681,11 +673,8 @@
 
     var meta = $('.gidx-job-meta', row);
     if (job.state === 'downloading') {
-      if (job.total > 0) {
-        meta.textContent = fmtBytes(job.loaded) + ' / ' + fmtBytes(job.total);
-      } else {
-        meta.textContent = fmtBytes(job.loaded) + ' downloaded';
-      }
+      if (job.total > 0) meta.textContent = fmtBytes(job.loaded) + ' / ' + fmtBytes(job.total);
+      else meta.textContent = fmtBytes(job.loaded) + ' downloaded';
     } else if (job.state === 'error') {
       meta.textContent = job.error || 'Unknown error';
     } else if (job.state === 'done') {
@@ -726,7 +715,6 @@
     job.controller = new AbortController();
     renderOrUpdateJob(job);
     ensurePanel().__updateFileStatus();
-
     logLine('Start: ' + job.name);
 
     try {
@@ -736,23 +724,18 @@
         signal: job.controller.signal
       });
 
-      if (!res.ok) {
-        throw new Error('HTTP ' + res.status);
-      }
+      if (!res.ok) throw new Error('HTTP ' + res.status);
 
       var len = parseInt(res.headers.get('content-length') || '0', 10);
       if (isFinite(len) && len > 0) job.total = len;
 
       var cd = res.headers.get('content-disposition') || '';
       var fileName = job.name;
-
       var matchUtf8 = /filename\*=UTF-8''([^;]+)/i.exec(cd);
       var matchPlain = /filename="?([^"]+)"?/i.exec(cd);
-      if (matchUtf8 && matchUtf8[1]) {
-        fileName = sanitizeFileName(decodeURIComponent(matchUtf8[1]));
-      } else if (matchPlain && matchPlain[1]) {
-        fileName = sanitizeFileName(matchPlain[1]);
-      }
+
+      if (matchUtf8 && matchUtf8[1]) fileName = sanitizeFileName(decodeURIComponent(matchUtf8[1]));
+      else if (matchPlain && matchPlain[1]) fileName = sanitizeFileName(matchPlain[1]);
 
       if (!res.body || !res.body.getReader) {
         var fallbackBlob = await res.blob();
@@ -833,7 +816,6 @@
 
         var hasWaiting = queue.some(function (j) { return j.state === 'waiting'; });
         var hasDownloading = queue.some(function (j) { return j.state === 'downloading'; });
-
         ensurePanel().__updateFileStatus();
 
         if (!hasWaiting && !hasDownloading) break;
@@ -844,227 +826,100 @@
     }
   }
 
-  function looksLikeFileName(name) {
-    if (!name || typeof name !== 'string') return false;
-    var raw = name.trim();
-    if (!raw) return false;
-    if (raw === '..' || raw.toLowerCase() === 'parent') return false;
+  function isIgnoredText(t) {
+    if (!t) return true;
+    t = t.trim();
+    if (!t) return true;
 
-    if (/^(select all|unselect|download selected|queue selected|export list|reload|retry failed|clear done|files|queue)$/i.test(raw)) {
-      return false;
-    }
-
-    if (/\.[a-z0-9]{1,16}$/i.test(raw)) return true;
-    if (!/[\/\\]/.test(raw) && raw.length > 1 && raw.length < 260) return true;
+    if (/^(select all|unselect|download selected|export list|reload|retry failed|clear done|files|queue|use encoded url|concurrent)$/i.test(t)) return true;
+    if (/^(name|size|modified|last modified|time|date)$/i.test(t)) return true;
+    if (/^\d+(\.\d+)?\s?(b|kb|mb|gb|tb)$/i.test(t)) return true;
+    if (/^\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(t)) return true;
+    if (/^\d{1,2}:\d{2}(:\d{2})?$/.test(t)) return true;
+    if (t === '..') return true;
 
     return false;
   }
 
-  function normalizeItemsFromAnyJSON(data) {
-    var out = [];
+  function looksLikeFileName(name) {
+    if (!name || typeof name !== 'string') return false;
+    var raw = name.trim();
+    if (!raw || isIgnoredText(raw)) return false;
 
-    function pushItem(name, isFolder) {
-      if (!name) return;
-      name = String(name).trim();
-      if (!name || name === '.' || name === '..') return;
-      out.push({ name: name, isFolder: !!isFolder });
-    }
-
-    function walk(node, depth) {
-      if (!node || depth > 4) return;
-
-      if (Array.isArray(node)) {
-        node.forEach(function (it) {
-          if (!it) return;
-
-          if (typeof it === 'string') {
-            pushItem(it, false);
-            return;
-          }
-
-          if (typeof it === 'object') {
-            var name = it.name || it.filename || it.title || it.path;
-            var isFolder = !!(it.is_dir || it.isdir || it.isDirectory || it.type === 'folder' || it.mimeType === 'application/vnd.google-apps.folder');
-            if (name) pushItem(name, isFolder);
-          }
-        });
-        return;
-      }
-
-      if (typeof node === 'object') {
-        ['files', 'data', 'items', 'children', 'list', 'objs'].forEach(function (k) {
-          if (node[k]) walk(node[k], depth + 1);
-        });
-      }
-    }
-
-    walk(data, 0);
-
-    var seen = Object.create(null);
-    return out.filter(function (it) {
-      var key = it.name + '|' + (it.isFolder ? 'd' : 'f');
-      if (seen[key]) return false;
-      seen[key] = 1;
-      return true;
-    });
+    if (/\.[a-z0-9]{1,16}$/i.test(raw)) return true;
+    return false;
   }
 
-  async function fetchJSONListing() {
-    var base = basePath();
-    var trials = [
-      location.href + (location.search ? '&' : '?') + 'json',
-      base + '?json',
-      location.href + (location.search ? '&' : '?') + 'a=ls',
-      base + '?a=ls',
-      location.href + (location.search ? '&' : '?') + 'ajax=1',
-      base + '?ajax=1',
-      location.href + (location.search ? '&' : '?') + 'format=json',
-      base + '?format=json'
+  function getVisibleText(el) {
+    if (!el) return '';
+    if (el.closest && el.closest('#gidx-panel')) return '';
+    var txt = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+    return txt;
+  }
+
+  function collectCandidateTexts() {
+    var candidates = [];
+    var seen = Object.create(null);
+
+    var selectors = [
+      'main *',
+      '[role="main"] *',
+      '.container *',
+      '.content *',
+      '.table *',
+      '.list *',
+      '.file *',
+      'tbody *',
+      'tr *',
+      'li *',
+      'div *'
     ];
 
-    var tried = Object.create(null);
+    selectors.forEach(function (sel) {
+      $all(sel).forEach(function (el) {
+        if (!el || !el.offsetParent) return;
+        if (el.closest && el.closest('#gidx-panel')) return;
+        if (el.children && el.children.length > 0) return;
 
-    for (var i = 0; i < trials.length; i++) {
-      var url = trials[i];
-      if (tried[url]) continue;
-      tried[url] = 1;
+        var txt = getVisibleText(el);
+        if (!txt || txt.length > 260) return;
+        if (isIgnoredText(txt)) return;
+        if (!looksLikeFileName(txt)) return;
 
-      try {
-        logLine('Try JSON: ' + url);
-        var res = await fetch(url, { credentials: 'same-origin' });
-        if (!res.ok) continue;
-        var ct = (res.headers.get('content-type') || '').toLowerCase();
-        if (ct.indexOf('json') === -1) continue;
-
-        var data = await res.json();
-        var items = normalizeItemsFromAnyJSON(data).filter(function (it) {
-          return !it.isFolder && looksLikeFileName(it.name);
-        });
-
-        if (items.length) {
-          logLine('JSON listing ok: ' + items.length + ' file(s)');
-          return { base: base, items: items };
+        if (!seen[txt]) {
+          seen[txt] = 1;
+          candidates.push(txt);
         }
-      } catch (e) {
-        logLine('JSON error: ' + ((e && e.message) || String(e)));
-      }
-    }
+      });
+    });
 
-    return null;
+    return candidates;
   }
 
-  function scrapeDOMAnchors() {
-    var out = [];
-    var seen = Object.create(null);
-
-    function addItem(name, url) {
-      name = String(name || '').trim();
-      url = String(url || '').trim();
-      if (!name || !url) return;
-      if (!looksLikeFileName(name)) return;
-      if (seen[url]) return;
-      seen[url] = 1;
-      out.push({ name: name, url: url });
+  function scrapeFileNamesFromText() {
+    var names = collectCandidateTexts();
+    logLine('Text scan: ' + names.length + ' candidate(s)');
+    if (names.length) {
+      logLine('Candidates: ' + names.slice(0, 20).join(' | '));
     }
-
-    function filenameFromHref(href) {
-      try {
-        var u = new URL(href, location.href);
-        var p = u.pathname || '';
-        var seg = p.split('/').filter(Boolean).pop() || '';
-        seg = decodeURIComponent(seg);
-
-        if (!seg) return '';
-        if (seg === '0:' || seg === '1:' || /^index\.(html?|php)$/i.test(seg)) return '';
-        return seg;
-      } catch (e) {
-        return '';
-      }
-    }
-
-    function normalizeUrl(href) {
-      try {
-        return new URL(href, location.href).href;
-      } catch (e) {
-        return '';
-      }
-    }
-
-    $all('a[href]').forEach(function (a) {
-      var href = a.getAttribute('href') || '';
-      if (!href) return;
-      if (href.startsWith('#')) return;
-      if (/^(javascript:|mailto:)/i.test(href)) return;
-
-      var url = normalizeUrl(href);
-      if (!url) return;
-      if (url.indexOf(location.origin) !== 0) return;
-
-      var text = (a.textContent || '').trim();
-      var name = '';
-
-      if (looksLikeFileName(text)) {
-        name = text;
-      } else {
-        name = filenameFromHref(url);
-      }
-
-      if (/\/$/.test(href)) return;
-      if (!name) return;
-
-      addItem(name, url);
-    });
-
-    $all('[data-href], [data-url], [onclick]').forEach(function (el) {
-      var href = el.getAttribute('data-href') || el.getAttribute('data-url') || '';
-      var onclick = el.getAttribute('onclick') || '';
-      var m = onclick.match(/['"]([^'"]+)['"]/);
-
-      if (!href && m) href = m[1];
-      if (!href) return;
-      if (/^(javascript:|mailto:|#)/i.test(href)) return;
-
-      var url = normalizeUrl(href);
-      if (!url) return;
-      if (url.indexOf(location.origin) !== 0) return;
-
-      var text = (el.textContent || '').trim();
-      var name = looksLikeFileName(text) ? text : filenameFromHref(url);
-      if (!name) return;
-
-      addItem(name, url);
-    });
-
-    out = out.filter(function (it) {
-      var name = (it.name || '').trim();
-      if (!name) return false;
-      if (name === '..') return false;
-      if (/^(favicon\.ico)$/i.test(name)) return false;
-      if (/^(workers\.dev|googleusercontent\.com)$/i.test(name)) return false;
-      return true;
-    });
-
-    logLine('DOM anchors/items: ' + out.length + ' file(s)');
-    return out.length ? out : null;
+    return names;
   }
 
   async function discoverFiles() {
     var panel = ensurePanel();
     var encoded = panel.__useEncoded();
+    var base = currentDirUrl();
 
-    var json = await fetchJSONListing();
-    if (json && json.items && json.items.length) {
-      return json.items.map(function (it) {
-        return {
-          name: it.name,
-          url: joinURL(json.base, it.name, encoded)
-        };
-      });
-    }
-
-    for (var i = 0; i < 8; i++) {
-      var dom = scrapeDOMAnchors();
-      if (dom && dom.length) return dom;
+    for (var i = 0; i < 10; i++) {
+      var names = scrapeFileNamesFromText();
+      if (names.length) {
+        return names.map(function (name) {
+          return {
+            name: name,
+            url: joinURL(base, name, encoded)
+          };
+        });
+      }
       await sleep(500);
     }
 
@@ -1076,9 +931,7 @@
     panel.__clearFiles();
     panel.__setStatus('Scanning files…');
 
-    if (force) {
-      logLine('Reload requested.');
-    }
+    if (force) logLine('Reload requested.');
 
     try {
       var files = await discoverFiles();
@@ -1089,13 +942,12 @@
 
         if (!__gidxObserverBound) {
           __gidxObserverBound = true;
-
           var timer = null;
+
           var observer = new MutationObserver(function () {
             clearTimeout(timer);
             timer = setTimeout(async function () {
               var p = ensurePanel();
-
               if ($all('input.gidx-cb', p.__fileList).length > 0) return;
 
               var retryFiles = await discoverFiles();
@@ -1135,6 +987,7 @@
         });
       });
 
+      panel.__clearFiles();
       files.forEach(function (f) {
         panel.__addFile(f.name, f.url);
       });
