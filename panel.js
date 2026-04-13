@@ -209,8 +209,8 @@
     /* header bar */
     var bar = document.createElement('div');
     bar.style.display = 'flex';
+    bar.style.flexDirection = 'column';
     bar.style.gap = '8px';
-    bar.style.flexWrap = 'wrap';
     bar.style.padding = '10px';
     bar.style.borderBottom = '1px solid ' + C.border;
     bar.style.position = 'sticky';
@@ -233,12 +233,29 @@
       return b;
     }
 
+    var row1 = document.createElement('div');
+    row1.style.display = 'flex';
+    row1.style.gap = '8px';
+    row1.style.flexWrap = 'wrap';
+    row1.style.alignItems = 'center';
+
+    var row2 = document.createElement('div');
+    row2.style.display = 'flex';
+    row2.style.gap = '8px';
+    row2.style.flexWrap = 'wrap';
+    row2.style.alignItems = 'center';
+
+    var footerBar = document.createElement('div');
+    footerBar.style.display = 'flex';
+    footerBar.style.alignItems = 'center';
+    footerBar.style.gap = '8px';
+
+    var btnReload    = mkBtn('Reload');
     var btnSelectAll = mkBtn('Select all');
     var btnUnselect  = mkBtn('Unselect');
-    var btnDownload  = mkBtn('Download selected');
-    var btnCNL       = mkBtn("Click'n'Load");
+    var btnCNL       = mkBtn('Send to JDownloader 2');
+    var btnDownload  = mkBtn('Download');
     var btnExport    = mkBtn('Export list');
-    var btnReload    = mkBtn('Reload');
     var btnToggle    = mkBtn('▾');
     btnToggle.title  = 'Collapse / Expand';
     btnToggle.style.marginLeft = 'auto';
@@ -253,15 +270,20 @@
     status.style.color = C.textDim;
     status.textContent = '…';
 
-    bar.appendChild(btnSelectAll);
-    bar.appendChild(btnUnselect);
-    bar.appendChild(btnDownload);
-    bar.appendChild(btnCNL);
-    bar.appendChild(btnExport);
-    bar.appendChild(btnReload);
-    bar.appendChild(status);
-    bar.appendChild(btnToggle);
+    row1.appendChild(btnReload);
+    row1.appendChild(btnSelectAll);
+    row1.appendChild(btnUnselect);
 
+    row2.appendChild(btnCNL);
+    row2.appendChild(btnDownload);
+    row2.appendChild(btnExport);
+
+    footerBar.appendChild(status);
+    footerBar.appendChild(btnToggle);
+
+    bar.appendChild(row1);
+    bar.appendChild(row2);
+    bar.appendChild(footerBar);
     /* options row */
     var opts = document.createElement('div');
     opts.style.display = 'flex';
