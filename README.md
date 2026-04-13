@@ -12,7 +12,7 @@ It adds checkboxes, bulk actions, and a small floating panel to your GoIndex pag
 
 Open your "Worker.js". Add<br>
 ```
-<script src="https://cdn.jsdelivr.net/gh/BaoBaoNice/panel-batch-download-for-goindex@v4/panel.js" defer></script>
+<script src="https://cdn.jsdelivr.net/gh/BaoBaoNice/panel-batch-download-for-goindex@v5/panel.js" defer></script>
 ```
 
 to ```"<html>"```, before ```"</body>"``` <br>
@@ -21,7 +21,7 @@ Example:<br>
 ```
 </head>
 <body>
-  <script src="https://cdn.jsdelivr.net/gh/BaoBaoNice/panel-batch-download-for-goindex@v4/panel.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/gh/BaoBaoNice/panel-batch-download-for-goindex@v5/panel.js" defer></script>
 </body>
 </html>
 ```
