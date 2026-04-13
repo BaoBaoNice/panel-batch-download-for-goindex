@@ -1,4 +1,4 @@
-/* panel.js – GoIndex Batch Download (no ZIP) – Dark UI + Minimize + Soft Sequential Queue */
+/* panel.js – GoIndex Batch Download (no ZIP) – Dark UI + Minimize */
 (function(){
   /* ========== tiny utils ========== */
   function sleep(ms){ return new Promise(function(r){ setTimeout(r,ms); }); }
@@ -18,6 +18,157 @@
     return /\.[a-z0-9]{2,8}$/i.test(raw);
   }
 
+  function uniqItemsByUrl(items){
+    var out = [];
+    var seen = {};
+    (items || []).forEach(function(it){
+      if (!it || !it.url) return;
+      var key = String(it.url).trim();
+      if (!key || seen[key]) return;
+      seen[key] = true;
+      out.push({
+        url: key,
+        name: it.name || ''
+      });
+    });
+    return out;
+  }
+
+  function exportItemsAsText(items, filename){
+    var lines = uniqItemsByUrl(items).map(function(x){ return x.url; });
+    var blob = new Blob([lines.join('\n') + '\n'], {
+      type: 'text/plain;charset=utf-8'
+    });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename || 'list.txt';
+    a.click();
+    setTimeout(function(){
+      try { URL.revokeObjectURL(a.href); } catch(e){}
+    }, 1000);
+  }
+
+  function inferJDSource(){
+    return location.href;
+  }
+
+  function inferPackageName(){
+    var p = location.pathname.replace(/\/+$/, '');
+    if (!p) return document.title || 'GoIndex Batch';
+    var last = p.split('/').filter(Boolean).pop();
+    return decodeURIComponent(last || document.title || 'GoIndex Batch');
+  }
+
+  function ensureHiddenTargetFrame(){
+    var f = document.getElementById('gidx-jd-target');
+    if (f) return f;
+    f = document.createElement('iframe');
+    f.id = 'gidx-jd-target';
+    f.name = 'gidx_jd_target';
+    f.style.display = 'none';
+    document.body.appendChild(f);
+    return f;
+  }
+
+  function checkJDownloader(timeoutMs){
+    timeoutMs = timeoutMs || 1800;
+
+    return new Promise(function(resolve){
+      var done = false;
+      var oldValue = window.jdownloader;
+      var hadOld = Object.prototype.hasOwnProperty.call(window, 'jdownloader');
+      var script = null;
+      var timer = null;
+
+      function finish(ok){
+        if (done) return;
+        done = true;
+        cleanup();
+        resolve(!!ok);
+      }
+
+      function cleanup(){
+        clearTimeout(timer);
+        if (script && script.parentNode) script.parentNode.removeChild(script);
+        try {
+          if (hadOld) {
+            window.jdownloader = oldValue;
+          } else {
+            delete window.jdownloader;
+          }
+        } catch(e){}
+      }
+
+      try {
+        delete window.jdownloader;
+      } catch(e) {
+        window.jdownloader = undefined;
+      }
+
+      script = document.createElement('script');
+      script.src = 'http://127.0.0.1:9666/jdcheck.js?ts=' + Date.now();
+      script.async = true;
+
+      script.onload = function(){
+        finish(!!window.jdownloader);
+      };
+      script.onerror = function(){
+        finish(false);
+      };
+
+      timer = setTimeout(function(){
+        finish(!!window.jdownloader);
+      }, timeoutMs);
+
+      document.head.appendChild(script);
+    });
+  }
+
+  function sendToJDownloaderPlain(items, options){
+    items = uniqItemsByUrl(items);
+    options = options || {};
+
+    if (!items.length) {
+      return { ok: false, reason: 'empty' };
+    }
+
+    ensureHiddenTargetFrame();
+
+    var form = document.createElement('form');
+    form.action = 'http://127.0.0.1:9666/flash/add';
+    form.method = 'POST';
+    form.target = 'gidx_jd_target';
+    form.style.display = 'none';
+
+    function addField(name, value){
+      var input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = name;
+      input.value = value == null ? '' : String(value);
+      form.appendChild(input);
+    }
+
+    addField('urls', items.map(function(x){ return x.url; }).join('\r\n'));
+    addField('source', options.source || inferJDSource());
+
+    if (options.passwords) {
+      addField('passwords', options.passwords);
+    }
+
+    if (options.packageName) {
+      addField('package', options.packageName);
+    }
+
+    document.body.appendChild(form);
+    form.submit();
+
+    setTimeout(function(){
+      try { form.remove(); } catch(e){}
+    }, 1000);
+
+    return { ok: true, count: items.length };
+  }
+
   /* ========== THEME (dark) ========== */
   var C = {
     bg:        '#2b2f36',
@@ -30,28 +181,8 @@
     btnBgHover:'#475066',
     btnBorder: '#556070',
     chipBg:    '#1f242d',
-    debugBg:   '#1e232b'
+    debugBg:   '#1e232b',
   };
-
-  var STORE = {
-    minimized: 'gidx_minimized',
-    concurrency: 'gidx_concurrency',
-    delay: 'gidx_delay_ms'
-  };
-
-  function getConcurrency(){
-    var v = parseInt(localStorage.getItem(STORE.concurrency) || '2', 10);
-    if (!isFinite(v) || v < 1) v = 2;
-    if (v > 8) v = 8;
-    return v;
-  }
-
-  function getDelayMs(){
-    var v = parseInt(localStorage.getItem(STORE.delay) || '2000', 10);
-    if (!isFinite(v) || v < 300) v = 2000;
-    if (v > 15000) v = 15000;
-    return v;
-  }
 
   /* ========== UI panel ========== */
   function ensurePanel(){
@@ -63,8 +194,8 @@
     wrap.style.right = '16px';
     wrap.style.bottom = '16px';
     wrap.style.zIndex = '2147483647';
-    wrap.style.width = 'min(460px, 92vw)';
-    wrap.style.maxHeight = '72vh';
+    wrap.style.width = 'min(420px, 92vw)';
+    wrap.style.maxHeight = '64vh';
     wrap.style.overflow = 'hidden';
     wrap.style.background = C.bg;
     wrap.style.border = '1px solid ' + C.border;
@@ -104,7 +235,8 @@
 
     var btnSelectAll = mkBtn('Select all');
     var btnUnselect  = mkBtn('Unselect');
-    var btnDownload  = mkBtn('Download Selected');
+    var btnDownload  = mkBtn('Download selected');
+    var btnCNL       = mkBtn("Click'n'Load");
     var btnExport    = mkBtn('Export list');
     var btnReload    = mkBtn('Reload');
     var btnToggle    = mkBtn('▾');
@@ -124,6 +256,7 @@
     bar.appendChild(btnSelectAll);
     bar.appendChild(btnUnselect);
     bar.appendChild(btnDownload);
+    bar.appendChild(btnCNL);
     bar.appendChild(btnExport);
     bar.appendChild(btnReload);
     bar.appendChild(status);
@@ -137,67 +270,15 @@
     opts.style.padding = '8px 10px';
     opts.style.borderBottom = '1px solid ' + C.border;
     opts.style.background = C.bgSoft;
-    opts.style.flexWrap = 'wrap';
 
     var encWrap = document.createElement('label');
     encWrap.style.display = 'inline-flex';
     encWrap.style.alignItems = 'center';
     encWrap.style.gap = '6px';
-    var encCb = document.createElement('input');
-    encCb.type='checkbox';
-    encCb.checked=false;
-    var encTxt = document.createElement('span');
-    encTxt.textContent = 'Use encoded URL';
-    encTxt.style.color = C.textDim;
-    encWrap.appendChild(encCb);
-    encWrap.appendChild(encTxt);
+    var encCb = document.createElement('input'); encCb.type='checkbox'; encCb.checked=false;
+    var encTxt = document.createElement('span'); encTxt.textContent = 'Use encoded URL'; encTxt.style.color = C.textDim;
+    encWrap.appendChild(encCb); encWrap.appendChild(encTxt);
     opts.appendChild(encWrap);
-
-    var ccWrap = document.createElement('label');
-    ccWrap.style.display = 'inline-flex';
-    ccWrap.style.alignItems = 'center';
-    ccWrap.style.gap = '6px';
-    var ccTxt = document.createElement('span');
-    ccTxt.textContent = 'Concurrent';
-    ccTxt.style.color = C.textDim;
-    var ccInput = document.createElement('input');
-    ccInput.type = 'number';
-    ccInput.min = '1';
-    ccInput.max = '8';
-    ccInput.step = '1';
-    ccInput.value = String(getConcurrency());
-    ccInput.style.width = '56px';
-    ccInput.style.padding = '4px 6px';
-    ccInput.style.borderRadius = '8px';
-    ccInput.style.border = '1px solid ' + C.btnBorder;
-    ccInput.style.background = C.bg;
-    ccInput.style.color = C.text;
-    ccWrap.appendChild(ccTxt);
-    ccWrap.appendChild(ccInput);
-    opts.appendChild(ccWrap);
-
-    var delayWrap = document.createElement('label');
-    delayWrap.style.display = 'inline-flex';
-    delayWrap.style.alignItems = 'center';
-    delayWrap.style.gap = '6px';
-    var delayTxt = document.createElement('span');
-    delayTxt.textContent = 'Delay(ms)';
-    delayTxt.style.color = C.textDim;
-    var delayInput = document.createElement('input');
-    delayInput.type = 'number';
-    delayInput.min = '300';
-    delayInput.max = '15000';
-    delayInput.step = '100';
-    delayInput.value = String(getDelayMs());
-    delayInput.style.width = '78px';
-    delayInput.style.padding = '4px 6px';
-    delayInput.style.borderRadius = '8px';
-    delayInput.style.border = '1px solid ' + C.btnBorder;
-    delayInput.style.background = C.bg;
-    delayInput.style.color = C.text;
-    delayWrap.appendChild(delayTxt);
-    delayWrap.appendChild(delayInput);
-    opts.appendChild(delayWrap);
 
     /* list area */
     var list = document.createElement('div');
@@ -218,7 +299,7 @@
     debugBox.style.borderTop = '1px solid ' + C.border;
     debugBox.style.background = C.debugBg;
     debugBox.style.color = C.textDim;
-    debugBox.style.maxHeight = '22vh';
+    debugBox.style.maxHeight = '20vh';
     debugBox.style.overflow = 'auto';
     debugBox.style.font = '12px ui-monospace, SFMono-Regular, Menlo, monospace';
     debugBox.textContent = 'Debug log will appear here…';
@@ -238,11 +319,13 @@
         };
       });
     }
-
-    function updateStatus(extra){
+    function getSelectedLinks(){
+      return getSelectedItems().map(function(it){ return it.url; });
+    }
+    function updateStatus(){
       var total = $all('input.gidx-cb', list).length;
       var sel = $all('input.gidx-cb:checked', list).length;
-      status.textContent = sel + '/' + total + ' selected' + (extra ? ' | ' + extra : '');
+      status.textContent = sel + '/' + total + ' selected';
     }
 
     /* actions */
@@ -250,95 +333,105 @@
       $all('input.gidx-cb', list).forEach(function(cb){ cb.checked = true; });
       updateStatus();
     };
-
     btnUnselect.onclick = function(){
       $all('input.gidx-cb', list).forEach(function(cb){ cb.checked = false; });
       updateStatus();
     };
-
     btnExport.onclick = function(){
       var items = getSelectedItems();
       if (!items.length) return alert('Chưa chọn file nào.');
-      var blob = new Blob([items.map(function(x){ return x.url; }).join('\n') + '\n'], {type:'text/plain;charset=utf-8'});
-      var a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = 'list.txt';
-      a.click();
-      URL.revokeObjectURL(a.href);
+      exportItemsAsText(items, 'list.txt');
     };
-
-    btnDownload.onclick = function(){
+    btnCNL.onclick = function(){
       (async function(){
         var items = getSelectedItems();
         if (!items.length) return alert('Chưa chọn file nào.');
 
-        /* Giữ input để UI không bị "lạ", nhưng bản mềm này chỉ dùng tuần tự */
-        var concurrency = parseInt(ccInput.value || '2', 10);
-        if (!isFinite(concurrency) || concurrency < 1) concurrency = 2;
-        if (concurrency > 8) concurrency = 8;
-        ccInput.value = String(concurrency);
-        localStorage.setItem(STORE.concurrency, String(concurrency));
+        items = uniqItemsByUrl(items);
+        wrap.__appendDebug("[JD] Preparing Click'n'Load for " + items.length + " link(s)");
+        updateStatus();
 
-        var delayMs = parseInt(delayInput.value || '2000', 10);
-        if (!isFinite(delayMs) || delayMs < 300) delayMs = 2000;
-        if (delayMs > 15000) delayMs = 15000;
-        delayInput.value = String(delayMs);
-        localStorage.setItem(STORE.delay, String(delayMs));
+        var oldStatus = status.textContent;
+        status.textContent = 'checking JD2...';
 
-        /* queue mềm thực tế: tuần tự để tránh browser bắn đồng thời */
-        function triggerDownload(item){
-          try{
-            var a = document.createElement('a');
-            a.href = item.url;
-            a.rel = 'noreferrer';
-            try{
-              a.download = item.name || decodeURIComponent((new URL(item.url)).pathname.split('/').pop() || '');
-            }catch(e){}
-            document.body.appendChild(a);
-            a.click();
-            a.remove();
-            return true;
-          }catch(e){
-            return false;
-          }
+        var jdReady = false;
+        try {
+          jdReady = await checkJDownloader(1800);
+        } catch (e) {
+          jdReady = false;
         }
 
-        wrap.__appendDebug('[DL] Sequential start: total=' + items.length + ', configured concurrency=' + concurrency + ', delay=' + delayMs + 'ms');
+        if (!jdReady) {
+          status.textContent = oldStatus;
+          wrap.__appendDebug('[JD] JD2 not detected or localhost blocked by browser');
 
-        for (var i = 0; i < items.length; i++) {
-          var item = items[i];
-          updateStatus((i + 1) + '/' + items.length + ' starting');
+          var fallback = confirm(
+            'Khong thay JDownloader2 dang chay, hoac browser dang chan localhost.\n\n' +
+            'Ban co muon Export list.txt de import tay vao JD2 khong?'
+          );
 
-          var ok = triggerDownload(item);
-          wrap.__appendDebug('[DL] ' + (ok ? 'OK' : 'FAIL') + ' | ' + (item.name || item.url));
-
-          if (i < items.length - 1) {
-            await sleep(delayMs);
+          if (fallback) {
+            exportItemsAsText(items, 'list.txt');
+            wrap.__appendDebug('[JD] Fallback export list.txt');
           }
+          return;
         }
 
-        updateStatus('all start commands sent');
-        wrap.__appendDebug('[DL] Done sending all start commands.');
+        try {
+          var result = sendToJDownloaderPlain(items, {
+            source: inferJDSource(),
+            packageName: inferPackageName()
+          });
+
+          if (!result.ok) {
+            throw new Error(result.reason || 'unknown');
+          }
+
+          status.textContent = oldStatus;
+          wrap.__appendDebug('[JD] Sent ' + result.count + ' link(s) to JDownloader2');
+          alert('Da gui ' + result.count + ' link(s) sang JDownloader2.');
+        } catch (e) {
+          status.textContent = oldStatus;
+          wrap.__appendDebug('[JD] Send failed: ' + (e && e.message ? e.message : String(e)));
+
+          var fallback2 = confirm(
+            'Gui sang JDownloader2 khong thanh cong.\n\n' +
+            'Ban co muon Export list.txt de import tay khong?'
+          );
+
+          if (fallback2) {
+            exportItemsAsText(items, 'list.txt');
+            wrap.__appendDebug('[JD] Fallback export list.txt after send failure');
+          }
+        }
       })();
     };
 
+    btnDownload.onclick = function(){
+      (async function(){
+        var links = getSelectedLinks();
+        if (!links.length) return alert('Chưa chọn file nào.');
+        var concurrency = 3, q = links.slice();
+        async function worker(){
+          while(q.length){
+            var url = q.shift();
+            try{
+              var a = document.createElement('a');
+              a.href = url;
+              a.rel = 'noreferrer';
+              a.target = '_blank';
+              try{ a.download = decodeURIComponent((new URL(url)).pathname.split('/').pop() || ''); }catch(e){}
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+            }catch(e){}
+            await sleep(60);
+          }
+        }
+        await Promise.all([worker(),worker(),worker()].slice(0,concurrency));
+      })();
+    };
     btnReload.onclick = function(){ init(true); };
-
-    ccInput.onchange = function(){
-      var v = parseInt(ccInput.value || '2', 10);
-      if (!isFinite(v) || v < 1) v = 2;
-      if (v > 8) v = 8;
-      ccInput.value = String(v);
-      localStorage.setItem(STORE.concurrency, String(v));
-    };
-
-    delayInput.onchange = function(){
-      var v = parseInt(delayInput.value || '2000', 10);
-      if (!isFinite(v) || v < 300) v = 2000;
-      if (v > 15000) v = 15000;
-      delayInput.value = String(v);
-      localStorage.setItem(STORE.delay, String(v));
-    };
 
     /* minimize / expand */
     function applyMinimized(min){
@@ -347,15 +440,13 @@
       opts.style.display  = isMin ? 'none' : 'flex';
       debugBox.style.display = isMin ? 'none' : 'block';
       btnToggle.textContent  = isMin ? '▸' : '▾';
-      localStorage.setItem(STORE.minimized, isMin ? '1' : '0');
+      localStorage.setItem('gidx_minimized', isMin ? '1' : '0');
     }
-
     btnToggle.onclick = function(){
-      var cur = localStorage.getItem(STORE.minimized) === '1';
+      var cur = localStorage.getItem('gidx_minimized') === '1';
       applyMinimized(!cur);
     };
-
-    applyMinimized(localStorage.getItem(STORE.minimized) === '1');
+    applyMinimized(localStorage.getItem('gidx_minimized') === '1');
 
     /* expose */
     wrap.__setStatus = function(t){ status.textContent = t; };
@@ -363,34 +454,17 @@
     wrap.__appendDebug = function(t){ debugBox.textContent += '\n' + t; try{ console.log('[gidx]', t); }catch(e){} };
     wrap.__clearList = function(){ list.innerHTML = ''; };
     wrap.__addItem = function(name, url){
-      var cb = document.createElement('input');
-      cb.type='checkbox';
-      cb.className='gidx-cb';
-      cb.dataset.url=url;
-      cb.dataset.name=name || '';
-      cb.onchange=updateStatus;
-
-      var label = document.createElement('label');
-      label.textContent=name;
-      label.style.userSelect='none';
-      label.style.whiteSpace='nowrap';
-      label.style.overflow='hidden';
-      label.style.textOverflow='ellipsis';
-      label.title=name;
-
-      list.appendChild(cb);
-      list.appendChild(label);
+      var cb = document.createElement('input'); cb.type='checkbox'; cb.className='gidx-cb'; cb.dataset.url=url; cb.dataset.name=name; cb.onchange=updateStatus;
+      var label = document.createElement('label'); label.textContent=name; label.style.userSelect='none'; label.style.whiteSpace='nowrap'; label.style.overflow='hidden'; label.style.textOverflow='ellipsis'; label.title=name;
+      list.appendChild(cb); list.appendChild(label);
     };
     wrap.__updateStatus = updateStatus;
     wrap.__useEncoded = function(){ return !!encCb.checked; };
-
     return wrap;
   }
 
   /* ========== Sources ========== */
-  function joinURL(base, name, encoded){
-    return base + (encoded ? encodeURIComponent(String(name)) : String(name));
-  }
+  function joinURL(base, name, encoded){ return base + (encoded ? encodeURIComponent(String(name)) : String(name)); }
 
   /* S1: JSON endpoints phổ biến */
   async function fetchJSONListing(log){
@@ -407,9 +481,7 @@
     ];
     var tried = {};
     for (var i=0;i<trials.length;i++){
-      var url = trials[i];
-      if (tried[url]) continue;
-      tried[url]=1;
+      var url = trials[i]; if (tried[url]) continue; tried[url]=1;
       try{
         var r = await fetch(url, { credentials:'omit' });
         log('GET ' + url + ' -> ' + r.status + ' ' + (r.headers.get('content-type')||''));
@@ -417,13 +489,9 @@
         var ct = (r.headers.get('content-type')||'').toLowerCase();
         if (ct.indexOf('json') === -1) continue;
         var data = await r.json();
-        var items = normalizeItemsFromAnyJSON(data).filter(function(it){
-          return looksLikeFileName(it.name) || it.isFolder;
-        });
+        var items = normalizeItemsFromAnyJSON(data).filter(function(it){ return looksLikeFileName(it.name) || it.isFolder; });
         if (items.length) return { base: base, items: items };
-      }catch(e){
-        log('ERR ' + url + ' -> ' + (e && e.message ? e.message : String(e)));
-      }
+      }catch(e){ log('ERR ' + url + ' -> ' + (e && e.message ? e.message : String(e))); }
     }
     return null;
   }
@@ -443,13 +511,10 @@
         if (isDir) continue;
         if (!looksLikeFileName(name)) continue;
         var abs = u.href;
-        if (!seen[abs]){
-          seen[abs]=1;
-          out.push({ name:name, url:abs });
-        }
+        if (!seen[abs]){ seen[abs]=1; out.push({ name:name, url:abs }); }
       }catch(e){}
     }
-
+    /* data-* fallback */
     var nodes = $all('[data-href],[data-url],[data-download]');
     log('DOM data-* candidates=' + nodes.length);
     for (var j=0;j<nodes.length;j++){
@@ -461,10 +526,7 @@
         var n2 = decodeURIComponent((u2.pathname.split('/').pop()||'').trim());
         if (!looksLikeFileName(n2)) continue;
         var abs2 = u2.href;
-        if (!seen[abs2]){
-          seen[abs2]=1;
-          out.push({ name:n2, url:abs2 });
-        }
+        if (!seen[abs2]){ seen[abs2]=1; out.push({ name:n2, url:abs2 }); }
       }catch(e){}
     }
     return out;
@@ -484,7 +546,7 @@
             var arr = found[i];
             for (var k=0;k<arr.length;k++){
               var it = arr[k];
-              var name = it && (it.name || it.filename || it.title || (it.path ? String(it.path).split('/').pop() : ''));
+              var name = it && (it.name || it.filename || it.title || (it.path? String(it.path).split('/').pop(): ''));
               if (!name) continue;
               var isFolder = !!(it.type===1 || it.isFolder===true || String(it.mime||'').toLowerCase()==='folder');
               items.push({ name:String(name), isFolder:isFolder });
@@ -497,35 +559,24 @@
     for (var t=0;t<items.length;t++){
       var nm = items[t].name;
       if (!looksLikeFileName(nm) && !items[t].isFolder) continue;
-      var key = nm + '|' + (items[t].isFolder ? '1' : '0');
-      if (!seen[key]){
-        seen[key]=1;
-        dedup.push(items[t]);
-      }
+      var key = nm + '|' + (items[t].isFolder?'1':'0');
+      if (!seen[key]){ seen[key]=1; dedup.push(items[t]); }
     }
     return dedup;
   }
-
   function collectArraysWithFiles(obj, depth, maxDepth){
     var out = [];
-    if (!obj || depth > maxDepth) return out;
-
+    if (!obj || depth>maxDepth) return out;
     if (Array.isArray(obj)){
-      var good = obj.filter(function(x){
-        return x && (x.name || x.filename || x.title || x.path);
-      });
+      var good = obj.filter(function(x){ return x && (x.name || x.filename || x.title || x.path); });
       if (good.length >= Math.min(2, obj.length)) out.push(obj);
       return out;
     }
-
     if (typeof obj === 'object'){
-      var keys = Object.keys(obj);
-      if (keys.length > 1000) return out;
+      var keys = Object.keys(obj); if (keys.length>1000) return out;
       for (var i=0;i<keys.length;i++){
         var v = obj[keys[i]];
-        try{
-          out = out.concat(collectArraysWithFiles(v, depth+1, maxDepth));
-        }catch(e){}
+        try{ out = out.concat(collectArraysWithFiles(v, depth+1, maxDepth)); }catch(e){}
       }
     }
     return out;
@@ -538,10 +589,8 @@
 
     function pushJson(j){
       try{
-        var items = normalizeItemsFromAnyJSON(j).filter(function(it){
-          return looksLikeFileName(it.name) || it.isFolder;
-        });
-        if (items.length) window.__GIDX_SEEN_ITEMS__ = items;
+        var items = normalizeItemsFromAnyJSON(j).filter(function(it){ return looksLikeFileName(it.name) || it.isFolder; });
+        if (items.length){ window.__GIDX_SEEN_ITEMS__ = items; }
       }catch(e){}
     }
 
@@ -551,9 +600,7 @@
         return ofetch(input, init).then(function(res){
           try{
             var ct = (res.headers && res.headers.get('content-type') || '').toLowerCase();
-            if (ct.indexOf('json') !== -1){
-              res.clone().json().then(pushJson).catch(function(){});
-            }
+            if (ct.indexOf('json') !== -1){ res.clone().json().then(pushJson).catch(function(){}); }
           }catch(e){}
           return res;
         });
@@ -562,29 +609,17 @@
 
     var OXHR = window.XMLHttpRequest;
     if (OXHR){
-      function PXHR(){
-        var x = new OXHR();
-        return x;
-      }
+      function PXHR(){ var x = new OXHR(); return x; }
       PXHR.prototype = OXHR.prototype;
       window.XMLHttpRequest = PXHR;
-
-      var open = OXHR.prototype.open;
-      var send = OXHR.prototype.send;
-
-      PXHR.prototype.open = function(){
-        this.__gidx_method = arguments[0];
-        this.__gidx_url = arguments[1];
-        return open.apply(this, arguments);
-      };
-
+      var open = OXHR.prototype.open, send = OXHR.prototype.send;
+      PXHR.prototype.open = function(){ this.__gidx_method = arguments[0]; this.__gidx_url = arguments[1]; return open.apply(this, arguments); };
       PXHR.prototype.send = function(){
         this.addEventListener('load', function(){
           try{
             var ct = (this.getResponseHeader && this.getResponseHeader('content-type') || '').toLowerCase();
             if (ct.indexOf('json') !== -1){
-              var txt = this.responseText;
-              try{ pushJson(JSON.parse(txt)); }catch(e){}
+              var txt = this.responseText; try{ pushJson(JSON.parse(txt)); }catch(e){}
             }
           }catch(e){}
         });
@@ -603,12 +638,10 @@
       else if (data.list && Array.isArray(data.list)) items = data.list;
       else if (data.children && Array.isArray(data.children)) items = data.children;
       else if (data.items && Array.isArray(data.items)) items = data.items;
-    }catch(e){
-      items = [];
-    }
+    }catch(e){ items = []; }
     if (!items || !items.length) return [];
     return items.map(function(it){
-      var name = it && (it.name || it.filename || it.title || (it.path ? String(it.path).split('/').pop() : ''));
+      var name = it && (it.name || it.filename || it.title || (it.path? String(it.path).split('/').pop(): ''));
       var fold = !!(it && (it.type===1 || it.isFolder===true || String(it.mime||'').toLowerCase()==='folder'));
       return name ? { name:String(name), isFolder:fold } : null;
     }).filter(function(x){ return !!x; });
@@ -617,25 +650,15 @@
   /* S5: scraper dành riêng cho alx-xlx: đọc cột "File" trong bảng */
   function scrapeAlxTable(log){
     var tables = document.querySelectorAll('table');
-    if (!tables || !tables.length){
-      log('alx-table: no <table>');
-      return [];
-    }
-
+    if (!tables || !tables.length) { log('alx-table: no <table>'); return []; }
     var target = null;
     for (var i=0;i<tables.length;i++){
       var t = tables[i];
       var head = t.querySelector('thead') || t;
       var txt = (head.textContent || '').toLowerCase();
-      if (txt.indexOf('file') !== -1 && (txt.indexOf('modified') !== -1 || txt.indexOf('size') !== -1)){
-        target = t;
-        break;
-      }
+      if (txt.indexOf('file') !== -1 && (txt.indexOf('modified') !== -1 || txt.indexOf('size') !== -1)) { target = t; break; }
     }
-    if (!target){
-      log('alx-table: no header match');
-      return [];
-    }
+    if (!target) { log('alx-table: no header match'); return []; }
 
     var rows = target.querySelectorAll('tbody tr, tr');
     var out = [];
@@ -668,57 +691,36 @@
     /* 1) JSON endpoints */
     var listing = await fetchJSONListing(log);
     if (listing && listing.items && listing.items.length){
-      var files = listing.items.filter(function(it){
-        return !it.isFolder && looksLikeFileName(it.name);
-      });
+      var files = listing.items.filter(function(it){ return !it.isFolder && looksLikeFileName(it.name); });
       log('JSON ok: total=' + listing.items.length + ', files=' + files.length);
       if (files.length){
         var enc = panel.__useEncoded();
-        for (var i=0;i<files.length;i++){
-          panel.__addItem(files[i].name, joinURL(base, files[i].name, enc));
-        }
-        panel.__setStatus('Sẵn sàng (JSON)');
-        panel.__updateStatus();
-        panel.__initing = false;
-        return;
+        for (var i=0;i<files.length;i++){ panel.__addItem(files[i].name, joinURL(base, files[i].name, enc)); }
+        panel.__setStatus('Sẵn sàng (JSON)'); panel.__updateStatus(); panel.__initing = false; return;
       }
     }
 
     /* 2) sniffer */
     var sniff = window.__GIDX_SEEN_ITEMS__;
     if (sniff && sniff.length){
-      var files2 = sniff.filter(function(x){
-        return !x.isFolder && looksLikeFileName(x.name);
-      });
+      var files2 = sniff.filter(function(x){ return !x.isFolder && looksLikeFileName(x.name); });
       log('Sniffer ok: files=' + files2.length);
       if (files2.length){
         var enc2 = panel.__useEncoded();
-        for (var s=0;s<files2.length;s++){
-          panel.__addItem(files2[s].name, joinURL(base, files2[s].name, enc2));
-        }
-        panel.__setStatus('Sẵn sàng (sniff)');
-        panel.__updateStatus();
-        panel.__initing = false;
-        return;
+        for (var s=0;s<files2.length;s++){ panel.__addItem(files2[s].name, joinURL(base, files2[s].name, enc2)); }
+        panel.__setStatus('Sẵn sàng (sniff)'); panel.__updateStatus(); panel.__initing = false; return;
       }
     }
 
     /* 3) window scan */
     var winItems = scanWindowForListing(log);
     if (winItems && winItems.length){
-      var files3 = winItems.filter(function(x){
-        return !x.isFolder && looksLikeFileName(x.name);
-      });
+      var files3 = winItems.filter(function(x){ return !x.isFolder && looksLikeFileName(x.name); });
       log('window-scan: files=' + files3.length + ' (from ' + winItems.length + ' items)');
       if (files3.length){
         var enc3 = panel.__useEncoded();
-        for (var w=0; w<files3.length; w++){
-          panel.__addItem(files3[w].name, joinURL(base, files3[w].name, enc3));
-        }
-        panel.__setStatus('Sẵn sàng (window)');
-        panel.__updateStatus();
-        panel.__initing = false;
-        return;
+        for (var w=0; w<files3.length; w++){ panel.__addItem(files3[w].name, joinURL(base, files3[w].name, enc3)); }
+        panel.__setStatus('Sẵn sàng (window)'); panel.__updateStatus(); panel.__initing = false; return;
       }
     }
 
@@ -729,13 +731,8 @@
       log('alx-table: files=' + filesA.length);
       if (filesA.length){
         var encA = panel.__useEncoded();
-        for (var a=0;a<filesA.length;a++){
-          panel.__addItem(filesA[a].name, joinURL(base, filesA[a].name, encA));
-        }
-        panel.__setStatus('Sẵn sàng (alx-table)');
-        panel.__updateStatus();
-        panel.__initing = false;
-        return;
+        for (var a=0;a<filesA.length;a++){ panel.__addItem(filesA[a].name, joinURL(base, filesA[a].name, encA)); }
+        panel.__setStatus('Sẵn sàng (alx-table)'); panel.__updateStatus(); panel.__initing = false; return;
       }
     }
 
@@ -743,13 +740,8 @@
     var anchors = scrapeDOMAnchors(log);
     if (anchors.length){
       log('DOM scrape: files=' + anchors.length);
-      for (var j=0;j<anchors.length;j++){
-        panel.__addItem(anchors[j].name, anchors[j].url);
-      }
-      panel.__setStatus('Sẵn sàng (DOM)');
-      panel.__updateStatus();
-      panel.__initing = false;
-      return;
+      for (var j=0;j<anchors.length;j++){ panel.__addItem(anchors[j].name, anchors[j].url); }
+      panel.__setStatus('Sẵn sàng (DOM)'); panel.__updateStatus(); panel.__initing = false; return;
     }
 
     panel.__setStatus('Không lấy được danh sách');
@@ -757,39 +749,19 @@
     panel.__initing = false;
   }
 
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', function(){ init(true); });
-  } else {
-    init(true);
-  }
+  if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', function(){ init(true); }); }
+  else { init(true); }
 
   /* re-init khi SPA đổi URL / DOM */
   (function(){
     var oldHref = location.href;
-    var obs = new MutationObserver(function(){
-      if (oldHref !== location.href) {
-        oldHref = location.href;
-        init(true);
-      }
-    });
+    var obs = new MutationObserver(function(){ if (oldHref !== location.href) { oldHref = location.href; init(true); } });
     if (document.body) obs.observe(document.body, {childList:true,subtree:true});
-
     ['pushState','replaceState'].forEach(function(m){
-      var orig = history[m];
-      if (!orig) return;
-      history[m] = function(){
-        var ret = orig.apply(this, arguments);
-        try { window.dispatchEvent(new Event('locationchange')); } catch(e){}
-        return ret;
-      };
+      var orig = history[m]; if (!orig) return;
+      history[m] = function(){ var ret = orig.apply(this, arguments); try { window.dispatchEvent(new Event('locationchange')); } catch(e){} return ret; };
     });
-
     window.addEventListener('locationchange', function(){ init(true); });
-
-    setInterval(function(){
-      if (!document.body.contains($('#gidx-panel'))) {
-        ensurePanel();
-      }
-    }, 1000);
+    setInterval(function(){ if (!document.body.contains($('#gidx-panel'))) { ensurePanel(); } }, 1000);
   })();
 })();
