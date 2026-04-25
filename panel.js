@@ -411,7 +411,7 @@
 
           status.textContent = oldStatus;
           wrap.__appendDebug('[JD] Sent ' + result.count + ' link(s) to JDownloader2');
-          alert('Da gui ' + result.count + ' link(s) sang JDownloader2.');
+          alert('Send ' + result.count + ' link(s) sang JDownloader2.');
         } catch (e) {
           status.textContent = oldStatus;
           wrap.__appendDebug('[JD] Send failed: ' + (e && e.message ? e.message : String(e)));
