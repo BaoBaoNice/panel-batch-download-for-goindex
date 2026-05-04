@@ -388,8 +388,8 @@
           wrap.__appendDebug('[JD] JD2 not detected or localhost blocked by browser');
 
           var fallback = confirm(
-            'Khong thay JDownloader2 dang chay, hoac browser dang chan localhost.\n\n' +
-            'Ban co muon Export list.txt de import tay vao JD2 khong?'
+            'JDownloader2 is not running, or the browser is blocking localhost.\n\n' +
+            'Do you want to export list.txt for manual import into JD2?'
           );
 
           if (fallback) {
@@ -400,7 +400,7 @@
         }
 
         try {
-          var result = sendToJDownloaderPlain(items, {
+          var result = sendToerPlain(items, {
             source: inferJDSource(),
             packageName: inferPackageName()
           });
@@ -411,14 +411,14 @@
 
           status.textContent = oldStatus;
           wrap.__appendDebug('[JD] Sent ' + result.count + ' link(s) to JDownloader2');
-          alert('Send ' + result.count + ' link(s) sang JDownloader2.');
+          alert('Send ' + result.count + ' link(s) to JDownloader2.');
         } catch (e) {
           status.textContent = oldStatus;
           wrap.__appendDebug('[JD] Send failed: ' + (e && e.message ? e.message : String(e)));
 
           var fallback2 = confirm(
-            'Gui sang JDownloader2 khong thanh cong.\n\n' +
-            'Ban co muon Export list.txt de import tay khong?'
+            'Send to JDownloader2 failed.\n\n' +
+            'Do you want to export list.txt for manual import?'
           );
 
           if (fallback2) {
